@@ -8,9 +8,16 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Manual image tag (default: manual-<short-sha>)'
+        required: false
+        type: string
 
 env:
-  IMAGE_NAME: yoke233/axonhub
+  DOCKERHUB_IMAGE: yoke233/axonhub
+  GHCR_IMAGE: ghcr.io/yoke233/axonhub
 
 jobs:
   build_single_arch:
@@ -38,17 +45,51 @@ jobs:
           fetch-depth: 1
 
       - name: Resolve tag & write VERSION
+        shell: bash
         run: |
-          git fetch --tags --force --depth=1
-          TAG=${GITHUB_REF#refs/tags/}
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            if [[ -z "${TAG}" ]]; then
+              TAG="manual-${GITHUB_SHA::7}"
+            fi
+          fi
           echo "TAG=$TAG" >> $GITHUB_ENV
           echo "$TAG" > internal/build/VERSION
           echo "Building tag: $TAG for ${{ matrix.arch }}"
 
+      - name: Decide target registries
+        id: registries
+        shell: bash
+        run: |
+          images=("${{ env.GHCR_IMAGE }}")
+          if [[ -n "${{ secrets.DOCKERHUB_USERNAME }}" && -n "${{ secrets.DOCKERHUB_TOKEN }}" ]]; then
+            images+=("${{ env.DOCKERHUB_IMAGE }}")
+            echo "push_dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push_dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub secrets not found, publish GHCR only."
+          fi
+
+          {
+            echo 'images<<EOF'
+            printf '%s\n' "${images[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Log in to Docker Hub
+        if: steps.registries.outputs.push_dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -58,18 +99,34 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.IMAGE_NAME }}
+          images: ${{ steps.registries.outputs.images }}
 
-      - name: Build & push single-arch (to both registries)
+      - name: Prepare image tags
+        id: image_tags
+        shell: bash
+        run: |
+          tags=()
+          while IFS= read -r image; do
+            [[ -z "${image}" ]] && continue
+            tags+=("${image}:${TAG}-${{ matrix.arch }}")
+            tags+=("${image}:latest-${{ matrix.arch }}")
+          done <<'EOF'
+          ${{ steps.registries.outputs.images }}
+          EOF
+
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build & push single-arch images
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.TAG }}-${{ matrix.arch }}
-            ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          tags: ${{ steps.image_tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -77,30 +134,77 @@ jobs:
           sbom: false
 
   create_manifests:
-    name: Create multi-arch manifests (Docker Hub)
+    name: Create multi-arch manifests
     needs: [build_single_arch]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      packages: write
+      contents: read
     steps:
-      - name: Extract tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            if [[ -z "${TAG}" ]]; then
+              TAG="manual-${GITHUB_SHA::7}"
+            fi
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+
+      - name: Decide target registries
+        id: registries
+        shell: bash
+        run: |
+          images=("${{ env.GHCR_IMAGE }}")
+          if [[ -n "${{ secrets.DOCKERHUB_USERNAME }}" && -n "${{ secrets.DOCKERHUB_TOKEN }}" ]]; then
+            images+=("${{ env.DOCKERHUB_IMAGE }}")
+            echo "push_dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push_dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub secrets not found, publish GHCR only."
+          fi
+
+          {
+            echo 'images<<EOF'
+            printf '%s\n' "${images[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
+        if: steps.registries.outputs.push_dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Create & push manifest (Docker Hub - version)
+      - name: Create & push manifests
+        shell: bash
         run: |
-          docker buildx imagetools create \
-            -t ${{ env.IMAGE_NAME }}:${TAG} \
-            ${{ env.IMAGE_NAME }}:${TAG}-amd64 \
-            ${{ env.IMAGE_NAME }}:${TAG}-arm64
+          while IFS= read -r image; do
+            [[ -z "${image}" ]] && continue
 
-      - name: Create & push manifest (Docker Hub - latest)
-        run: |
-          docker buildx imagetools create \
-            -t ${{ env.IMAGE_NAME }}:latest \
-            ${{ env.IMAGE_NAME }}:latest-amd64 \
-            ${{ env.IMAGE_NAME }}:latest-arm64
+            docker buildx imagetools create \
+              -t "${image}:${TAG}" \
+              "${image}:${TAG}-amd64" \
+              "${image}:${TAG}-arm64"
+
+            docker buildx imagetools create \
+              -t "${image}:latest" \
+              "${image}:latest-amd64" \
+              "${image}:latest-arm64"
+          done <<'EOF'
+          ${{ steps.registries.outputs.images }}
+          EOF
