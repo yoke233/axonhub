@@ -9,6 +9,9 @@ on:
     tags:
       - 'v*'
 
+env:
+  IMAGE_NAME: yoke233/axonhub
+
 jobs:
   build_single_arch:
     name: Build & push (${{ matrix.arch }}) [native]
@@ -56,7 +59,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            looplj/axonhub
+            ${{ env.IMAGE_NAME }}
 
       - name: Build & push single-arch (to both registries)
         uses: docker/build-push-action@v6
@@ -65,8 +68,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            looplj/axonhub:${{ env.TAG }}-${{ matrix.arch }}
-            looplj/axonhub:latest-${{ matrix.arch }}
+            ${{ env.IMAGE_NAME }}:${{ env.TAG }}-${{ matrix.arch }}
+            ${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -91,13 +94,13 @@ jobs:
       - name: Create & push manifest (Docker Hub - version)
         run: |
           docker buildx imagetools create \
-            -t looplj/axonhub:${TAG} \
-            looplj/axonhub:${TAG}-amd64 \
-            looplj/axonhub:${TAG}-arm64
+            -t ${{ env.IMAGE_NAME }}:${TAG} \
+            ${{ env.IMAGE_NAME }}:${TAG}-amd64 \
+            ${{ env.IMAGE_NAME }}:${TAG}-arm64
 
       - name: Create & push manifest (Docker Hub - latest)
         run: |
           docker buildx imagetools create \
-            -t looplj/axonhub:latest \
-            looplj/axonhub:latest-amd64 \
-            looplj/axonhub:latest-arm64
+            -t ${{ env.IMAGE_NAME }}:latest \
+            ${{ env.IMAGE_NAME }}:latest-amd64 \
+            ${{ env.IMAGE_NAME }}:latest-arm64
