@@ -20,9 +20,83 @@ import (
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/internal/tracing"
 	"github.com/looplj/axonhub/llm/httpclient"
+	anthropicfmt "github.com/looplj/axonhub/llm/transformer/anthropic"
 	"github.com/looplj/axonhub/llm/transformer/anthropic/claudecode"
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
+
+type anthropicmsgRequestForTest struct {
+	Model    string `json:"model"`
+	Metadata struct {
+		UserID string `json:"user_id"`
+	} `json:"metadata"`
+	System []struct {
+		Type         string `json:"type"`
+		Text         string `json:"text"`
+		CacheControl *struct {
+			Type string `json:"type"`
+		} `json:"cache_control"`
+	} `json:"system"`
+	Messages []struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type         string `json:"type"`
+			Text         string `json:"text"`
+			CacheControl *struct {
+				Type string `json:"type"`
+			} `json:"cache_control"`
+		} `json:"content"`
+	} `json:"messages"`
+	MaxTokens int64 `json:"max_tokens"`
+}
+
+func (r anthropicmsgRequestForTest) toAnthropic() *anthropicfmt.MessageRequest {
+	req := &anthropicfmt.MessageRequest{
+		Model:     r.Model,
+		MaxTokens: r.MaxTokens,
+		Metadata: &anthropicfmt.AnthropicMetadata{
+			UserID: r.Metadata.UserID,
+		},
+	}
+
+	if len(r.System) > 0 {
+		req.System = &anthropicfmt.SystemPrompt{
+			MultiplePrompts: make([]anthropicfmt.SystemPromptPart, 0, len(r.System)),
+		}
+		for _, part := range r.System {
+			sysPart := anthropicfmt.SystemPromptPart{
+				Type: part.Type,
+				Text: part.Text,
+			}
+			if part.CacheControl != nil {
+				sysPart.CacheControl = &anthropicfmt.CacheControl{Type: part.CacheControl.Type}
+			}
+			req.System.MultiplePrompts = append(req.System.MultiplePrompts, sysPart)
+		}
+	}
+
+	for _, msg := range r.Messages {
+		param := anthropicfmt.MessageParam{
+			Role: msg.Role,
+			Content: anthropicfmt.MessageContent{
+				MultipleContent: make([]anthropicfmt.MessageContentBlock, 0, len(msg.Content)),
+			},
+		}
+		for _, part := range msg.Content {
+			block := anthropicfmt.MessageContentBlock{
+				Type: part.Type,
+				Text: &part.Text,
+			}
+			if part.CacheControl != nil {
+				block.CacheControl = &anthropicfmt.CacheControl{Type: part.CacheControl.Type}
+			}
+			param.Content.MultipleContent = append(param.Content.MultipleContent, block)
+		}
+		req.Messages = append(req.Messages, param)
+	}
+
+	return req
+}
 
 func setupTestTraceMiddleware(t *testing.T) (*gin.Engine, *ent.Client, *biz.TraceService) {
 	t.Helper()
@@ -326,6 +400,118 @@ func TestWithTrace_ClaudeCodePreservesExistingTraceHeader(t *testing.T) {
 	require.Equal(t, existingTraceID, capturedTraceID)
 	require.Equal(t, "user_123", capturedUserID)
 	require.JSONEq(t, string(expectedBody), string(capturedBody))
+}
+
+func TestWithTrace_AnthropicPromptCacheDerivedTraceID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	config := tracing.Config{
+		TraceHeader: "AH-Trace-Id",
+	}
+
+	router, client, traceService := setupTestTraceMiddleware(t)
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(httptest.NewRequest(http.MethodGet, "/", nil).Context())
+	ctx = ent.NewContext(ctx, client)
+
+	testProject, err := client.Project.Create().
+		SetName("test-project").
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	router.Use(func(c *gin.Context) {
+		ctx := authz.WithTestBypass(c.Request.Context())
+		ctx = ent.NewContext(ctx, client)
+		ctx = contexts.WithProjectID(ctx, testProject.ID)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	})
+	router.Use(WithTrace(config, traceService))
+
+	var (
+		traceID   string
+		sessionID string
+	)
+
+	router.POST("/anthropic/v1/messages", func(c *gin.Context) {
+		trace, ok := contexts.GetTrace(c.Request.Context())
+		require.True(t, ok)
+		traceID = trace.TraceID
+
+		var okSession bool
+		sessionID, okSession = shared.GetSessionID(c.Request.Context())
+		require.True(t, okSession)
+
+		c.Status(http.StatusOK)
+	})
+
+	body := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"metadata":{"user_id":"user-a"},
+		"system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"stable context","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"latest question"}]}
+		],
+		"max_tokens":128
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotEmpty(t, traceID)
+	require.Equal(t, traceID, sessionID)
+	require.Contains(t, traceID, "at-apc-")
+
+	req2 := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", bytes.NewReader(body))
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.Equal(t, traceID, sessionID)
+}
+
+func TestWithTrace_AnthropicPromptCacheDerivedTraceIDChangesByUserAndPrefix(t *testing.T) {
+	reqA := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"metadata":{"user_id":"user-a"},
+		"system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"stable context","cache_control":{"type":"ephemeral"}}]}],
+		"max_tokens":128
+	}`)
+
+	reqB := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"metadata":{"user_id":"user-b"},
+		"system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"stable context","cache_control":{"type":"ephemeral"}}]}],
+		"max_tokens":128
+	}`)
+
+	reqC := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"metadata":{"user_id":"user-a"},
+		"system":[{"type":"text","text":"stable system changed","cache_control":{"type":"ephemeral"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"stable context","cache_control":{"type":"ephemeral"}}]}],
+		"max_tokens":128
+	}`)
+
+	var msgReqA, msgReqB, msgReqC anthropicmsgRequestForTest
+	require.NoError(t, json.Unmarshal(reqA, &msgReqA))
+	require.NoError(t, json.Unmarshal(reqB, &msgReqB))
+	require.NoError(t, json.Unmarshal(reqC, &msgReqC))
+
+	keyA := buildAnthropicPromptCacheTraceID(msgReqA.toAnthropic())
+	keyB := buildAnthropicPromptCacheTraceID(msgReqB.toAnthropic())
+	keyC := buildAnthropicPromptCacheTraceID(msgReqC.toAnthropic())
+
+	require.NotEmpty(t, keyA)
+	require.NotEqual(t, keyA, keyB)
+	require.NotEqual(t, keyA, keyC)
 }
 
 func TestWithTrace_CodexDisabled(t *testing.T) {

@@ -142,6 +142,12 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, fmt.Errorf("%w: messages are required", transformer.ErrInvalidRequest)
 	}
 
+	if llmReq.PromptCacheKey == nil || *llmReq.PromptCacheKey == "" {
+		if sessionID, ok := shared.GetSessionID(ctx); ok && sessionID != "" {
+			llmReq.PromptCacheKey = &sessionID
+		}
+	}
+
 	// Convert to OpenAI Request format (this strips helper fields)
 	oaiReq := RequestFromLLM(llmReq)
 	//nolint:exhaustive // Checked.

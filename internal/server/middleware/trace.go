@@ -2,6 +2,9 @@ package middleware
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/internal/tracing"
+	anthropicfmt "github.com/looplj/axonhub/llm/transformer/anthropic"
 	"github.com/looplj/axonhub/llm/transformer/anthropic/claudecode"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/shared"
@@ -90,6 +94,16 @@ func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.Handle
 
 		if traceID == "" && config.CodexTraceEnabled {
 			traceID = tryExtractTraceIDFromCodexRequest(c)
+		}
+
+		if traceID == "" {
+			var err error
+
+			traceID, err = tryExtractAnthropicPromptCacheTraceID(c)
+			if err != nil {
+				AbortWithError(c, http.StatusBadRequest, err)
+				return
+			}
 		}
 
 		if traceID == "" && len(config.ExtraTraceBodyFields) > 0 {
@@ -186,6 +200,112 @@ func tryExtractTraceIDFromClaudeCodeRequest(c *gin.Context, config tracing.Confi
 	log.Debug(c.Request.Context(), "Extracted trace ID from claude code payload", log.String("trace_id", traceID))
 
 	return traceID, nil
+}
+
+func tryExtractAnthropicPromptCacheTraceID(c *gin.Context) (string, error) {
+	if c.Request.Method != http.MethodPost {
+		return "", nil
+	}
+
+	path := c.Request.URL.Path
+	if path != "/anthropic/v1/messages" && path != "/v1/messages" {
+		return "", nil
+	}
+
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read request body: %w", err)
+	}
+
+	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	if len(bodyBytes) == 0 {
+		return "", nil
+	}
+
+	var req anthropicfmt.MessageRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		return "", nil
+	}
+
+	stableKey := buildAnthropicPromptCacheTraceID(&req)
+	if stableKey == "" {
+		return "", nil
+	}
+
+	log.Debug(c.Request.Context(), "Extracted anthropic prompt cache trace ID", log.String("trace_id", stableKey))
+
+	return stableKey, nil
+}
+
+func buildAnthropicPromptCacheTraceID(req *anthropicfmt.MessageRequest) string {
+	if req == nil {
+		return ""
+	}
+
+	userIdentity := ""
+	if req.Metadata != nil {
+		userIdentity = strings.TrimSpace(req.Metadata.UserID)
+	}
+	if userIdentity == "" {
+		userIdentity = "anonymous"
+	}
+
+	var cacheableParts []string
+
+	if req.System != nil {
+		if req.System.Prompt != nil {
+			if prompt := strings.TrimSpace(*req.System.Prompt); prompt != "" {
+				cacheableParts = append(cacheableParts, "system:"+prompt)
+			}
+		}
+
+		for _, part := range req.System.MultiplePrompts {
+			if part.CacheControl == nil {
+				continue
+			}
+
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+
+			cacheableParts = append(cacheableParts, "system:"+text)
+		}
+	}
+
+	for _, msg := range req.Messages {
+		for _, block := range msg.Content.MultipleContent {
+			if block.CacheControl == nil {
+				continue
+			}
+
+			if block.Type != "text" || block.Text == nil {
+				continue
+			}
+
+			text := strings.TrimSpace(*block.Text)
+			if text == "" {
+				continue
+			}
+
+			cacheableParts = append(cacheableParts, msg.Role+":"+text)
+		}
+	}
+
+	if len(cacheableParts) == 0 {
+		return ""
+	}
+
+	seed := strings.Join([]string{
+		"anthropic-cache-v1",
+		strings.TrimSpace(req.Model),
+		userIdentity,
+		strings.Join(cacheableParts, "\n---\n"),
+	}, "\n")
+
+	sum := sha256.Sum256([]byte(seed))
+
+	return "at-apc-" + hex.EncodeToString(sum[:16])
 }
 
 // tryExtractTraceIDFromCodexRequest extracts the trace ID from the Codex session header.

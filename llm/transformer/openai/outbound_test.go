@@ -14,6 +14,7 @@ import (
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 func TestOutboundTransformer_TransformRequest(t *testing.T) {
@@ -187,6 +188,36 @@ func TestOutboundTransformer_TransformRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOutboundTransformer_TransformRequest_UsesSharedSessionIDAsPromptCacheKeyFallback(t *testing.T) {
+	transformerInterface, err := NewOutboundTransformer("https://api.openai.com/v1", "test-key")
+	assert.NoError(t, err)
+
+	transformer := transformerInterface.(*OutboundTransformer)
+	ctx := shared.WithSessionID(context.Background(), "anthropic-derived-cache-key")
+
+	req := &llm.Request{
+		Model: "gpt-4o-mini",
+		Messages: []llm.Message{
+			{
+				Role: "user",
+				Content: llm.MessageContent{
+					Content: lo.ToPtr("hello"),
+				},
+			},
+		},
+	}
+
+	httpReq, err := transformer.TransformRequest(ctx, req)
+	assert.NoError(t, err)
+
+	var payload Request
+	err = json.Unmarshal(httpReq.Body, &payload)
+	assert.NoError(t, err)
+	if assert.NotNil(t, payload.PromptCacheKey) {
+		assert.Equal(t, "anthropic-derived-cache-key", *payload.PromptCacheKey)
 	}
 }
 
