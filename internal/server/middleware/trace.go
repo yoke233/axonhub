@@ -2,8 +2,6 @@ package middleware
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -242,70 +240,12 @@ func buildAnthropicPromptCacheTraceID(req *anthropicfmt.MessageRequest) string {
 		return ""
 	}
 
-	userIdentity := ""
-	if req.Metadata != nil {
-		userIdentity = strings.TrimSpace(req.Metadata.UserID)
-	}
-	if userIdentity == "" {
-		userIdentity = "anonymous"
-	}
-
-	var cacheableParts []string
-
-	if req.System != nil {
-		if req.System.Prompt != nil {
-			if prompt := strings.TrimSpace(*req.System.Prompt); prompt != "" {
-				cacheableParts = append(cacheableParts, "system:"+prompt)
-			}
-		}
-
-		for _, part := range req.System.MultiplePrompts {
-			if part.CacheControl == nil {
-				continue
-			}
-
-			text := strings.TrimSpace(part.Text)
-			if text == "" {
-				continue
-			}
-
-			cacheableParts = append(cacheableParts, "system:"+text)
-		}
-	}
-
-	for _, msg := range req.Messages {
-		for _, block := range msg.Content.MultipleContent {
-			if block.CacheControl == nil {
-				continue
-			}
-
-			if block.Type != "text" || block.Text == nil {
-				continue
-			}
-
-			text := strings.TrimSpace(*block.Text)
-			if text == "" {
-				continue
-			}
-
-			cacheableParts = append(cacheableParts, msg.Role+":"+text)
-		}
-	}
-
-	if len(cacheableParts) == 0 {
+	key := anthropicfmt.BuildPromptCacheKey(req)
+	if key == "" {
 		return ""
 	}
 
-	seed := strings.Join([]string{
-		"anthropic-cache-v1",
-		strings.TrimSpace(req.Model),
-		userIdentity,
-		strings.Join(cacheableParts, "\n---\n"),
-	}, "\n")
-
-	sum := sha256.Sum256([]byte(seed))
-
-	return "at-apc-" + hex.EncodeToString(sum[:16])
+	return strings.Replace(key, "anthropic-cache-v2-", "at-apc-", 1)
 }
 
 // tryExtractTraceIDFromCodexRequest extracts the trace ID from the Codex session header.

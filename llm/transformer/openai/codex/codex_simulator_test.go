@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -14,6 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samber/lo"
+
+	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/oauth"
 	"github.com/looplj/axonhub/llm/simulator"
 	"github.com/looplj/axonhub/llm/transformer/openai"
@@ -164,6 +168,73 @@ func TestCodexOutbound_SessionIDPrecedence(t *testing.T) {
 		_, parseErr := uuid.Parse(sessionID)
 		assert.NoError(t, parseErr)
 	})
+}
+
+func TestCodexOutbound_DropsPreviousResponseID(t *testing.T) {
+	ctx := context.Background()
+	sim := newCodexSimulator(t)
+	req := newCodexChatCompletionRequest(t)
+
+	body := map[string]any{}
+	require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+	body["previous_response_id"] = "resp_prev_123"
+	patched, err := json.Marshal(body)
+	require.NoError(t, err)
+	req.Body = io.NopCloser(bytes.NewReader(patched))
+	req.ContentLength = int64(len(patched))
+
+	finalReq, err := sim.Simulate(ctx, req)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(finalReq.Body).Decode(&payload))
+	_, exists := payload["previous_response_id"]
+	assert.False(t, exists)
+}
+
+func TestCodexOutbound_UsesContextSessionAsPromptCacheKey(t *testing.T) {
+	ctx := shared.WithSessionID(context.Background(), "at-apc-session-cache-key")
+	sim := newCodexSimulator(t)
+	req := newCodexChatCompletionRequest(t)
+
+	finalReq, err := sim.Simulate(ctx, req)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(finalReq.Body).Decode(&payload))
+	assert.Equal(t, "at-apc-session-cache-key", payload["prompt_cache_key"])
+	assert.Equal(t, "at-apc-session-cache-key", finalReq.Header.Get("Session_id"))
+}
+
+func TestCodexOutbound_PrefersAnthropicPromptCacheKeyMetadata(t *testing.T) {
+	ctx := shared.WithSessionID(context.Background(), "trace-session-fallback")
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider: staticTokenGetter{
+			creds: &oauth.OAuthCredentials{
+				AccessToken: testAccessTokenWithAccountID(t),
+				ExpiresAt:   time.Now().Add(time.Hour),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+
+	request := &llm.Request{
+		Model:       "gpt-5.4",
+		Messages:    []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("Hello")}}},
+		RequestType: llm.RequestTypeChat,
+		TransformerMetadata: map[string]any{
+			"anthropic_prompt_cache_key": "anthropic-cache-v2-stable",
+		},
+	}
+
+	finalReq, err := outbound.TransformRequest(ctx, request)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(bytes.NewReader(finalReq.Body)).Decode(&payload))
+	assert.Equal(t, "anthropic-cache-v2-stable", payload["prompt_cache_key"])
+	assert.Equal(t, "anthropic-cache-v2-stable", finalReq.Headers.Get("Session_id"))
 }
 
 func newCodexSimulator(t *testing.T) *simulator.Simulator {

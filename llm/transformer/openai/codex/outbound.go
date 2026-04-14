@@ -143,6 +143,19 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	reqCopy.MaxTokens = nil
 
 	reqCopy.Metadata = nil
+	reqCopy.PreviousResponseID = nil
+
+	if reqCopy.TransformerMetadata != nil {
+		if anthropicPromptCacheKey, ok := reqCopy.TransformerMetadata["anthropic_prompt_cache_key"].(string); ok && anthropicPromptCacheKey != "" {
+			reqCopy.PromptCacheKey = lo.ToPtr(anthropicPromptCacheKey)
+		}
+	}
+
+	if reqCopy.PromptCacheKey == nil || *reqCopy.PromptCacheKey == "" {
+		if sessionID, ok := shared.GetSessionID(ctx); ok && sessionID != "" {
+			reqCopy.PromptCacheKey = lo.ToPtr(sessionID)
+		}
+	}
 
 	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
 	if err != nil {
@@ -177,6 +190,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		hreq.Headers.Set(SessionHeader, rawSessionID)
 	} else if sessionID := ExtractSessionIDFromTurnMetadata(rawTurnMetadata); sessionID != "" {
 		hreq.Headers.Set(SessionHeader, sessionID)
+	} else if reqCopy.PromptCacheKey != nil && *reqCopy.PromptCacheKey != "" {
+		hreq.Headers.Set(SessionHeader, *reqCopy.PromptCacheKey)
 	} else if hreq.Headers.Get(SessionHeader) == "" {
 		if sessionID, ok := shared.GetSessionID(ctx); ok {
 			hreq.Headers.Set(SessionHeader, sessionID)

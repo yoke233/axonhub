@@ -2237,3 +2237,33 @@ func TestInboundTransformer_TransformResponse_EdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestInboundTransformer_DerivesPromptCacheKeyWithoutExplicitCacheControl(t *testing.T) {
+	transformer := NewInboundTransformer()
+	httpReq := &httpclient.Request{
+		Headers: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: []byte(`{
+			"model": "gpt-5.4",
+			"max_tokens": 128,
+			"system": "stable system",
+			"messages": [
+				{
+					"role": "user",
+					"content": "stable context"
+				}
+			],
+			"metadata": {
+				"user_id": "user-derived-cache"
+			}
+		}`),
+	}
+
+	result, err := transformer.TransformRequest(context.Background(), httpReq)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.PromptCacheKey)
+	require.Contains(t, *result.PromptCacheKey, "anthropic-cache-v2-")
+	require.Equal(t, *result.PromptCacheKey, result.TransformerMetadata["anthropic_prompt_cache_key"])
+}

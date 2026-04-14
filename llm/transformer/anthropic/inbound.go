@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/samber/lo"
+
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/internal/pkg/xjson"
@@ -116,7 +118,31 @@ func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *http
 		}
 	}
 
-	return convertToLLMRequest(&anthropicReq)
+	llmReq, err := convertToLLMRequest(&anthropicReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if llmReq.PromptCacheKey == nil || *llmReq.PromptCacheKey == "" {
+		if key := BuildPromptCacheKey(&anthropicReq); key != "" {
+			llmReq.PromptCacheKey = lo.ToPtr(key)
+		}
+	}
+
+	if llmReq.TransformerMetadata == nil {
+		llmReq.TransformerMetadata = map[string]any{}
+	}
+
+	if anthropicReq.Metadata != nil && anthropicReq.Metadata.UserID != "" {
+		llmReq.TransformerMetadata["anthropic_metadata_user_id"] = anthropicReq.Metadata.UserID
+	}
+
+	if llmReq.PromptCacheKey != nil && *llmReq.PromptCacheKey != "" {
+		llmReq.TransformerMetadata["anthropic_prompt_cache_key"] = *llmReq.PromptCacheKey
+	}
+
+
+	return llmReq, nil
 }
 
 // TransformResponse transforms ChatCompletionResponse to Anthropic HTTP response.
