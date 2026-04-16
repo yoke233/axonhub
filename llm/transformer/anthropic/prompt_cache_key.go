@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/looplj/axonhub/llm"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 type promptCacheKeyMode string
@@ -50,16 +48,6 @@ func BuildPromptCacheKey(req *MessageRequest) string {
 	}
 
 	return buildStablePromptCacheKey("anthropic-cache-v2", payload)
-}
-
-// BuildPromptCacheKeyFromLLMRequest derives a stable Anthropic prompt cache key from a unified llm.Request.
-func BuildPromptCacheKeyFromLLMRequest(req *llm.Request) string {
-	if req == nil {
-		return ""
-	}
-
-	anthropicReq := convertToAnthropicRequestWithConfig(req, nil, shared.TransportScope{})
-	return BuildPromptCacheKey(anthropicReq)
 }
 
 func buildPromptCacheKeySeed(req *MessageRequest) (promptCacheKeySeed, bool) {

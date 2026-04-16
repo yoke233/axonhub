@@ -40,6 +40,10 @@ type Config struct {
 	// CodexTraceEnabled enables extracting trace IDs from Codex request headers.
 	// Default to false.
 	CodexTraceEnabled bool `conf:"codex_trace_enabled" yaml:"codex_trace_enabled" json:"codex_trace_enabled"`
+
+	// AnthropicPromptCacheTraceEnabled enables deriving trace IDs from Anthropic prompt cache keys.
+	// Default to false.
+	AnthropicPromptCacheTraceEnabled bool `conf:"anthropic_prompt_cache_trace_enabled" yaml:"anthropic_prompt_cache_trace_enabled" json:"anthropic_prompt_cache_trace_enabled"`
 }
 
 // GenerateTraceID generate trace id, format as at-{{uuid}}.

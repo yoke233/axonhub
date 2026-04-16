@@ -11,6 +11,7 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 func TestInboundTransformer_TransformRequest(t *testing.T) {
@@ -2265,5 +2266,5 @@ func TestInboundTransformer_DerivesPromptCacheKeyWithoutExplicitCacheControl(t *
 	require.NotNil(t, result)
 	require.NotNil(t, result.PromptCacheKey)
 	require.Contains(t, *result.PromptCacheKey, "anthropic-cache-v2-")
-	require.Equal(t, *result.PromptCacheKey, result.TransformerMetadata["anthropic_prompt_cache_key"])
+	require.Equal(t, *result.PromptCacheKey, result.TransformerMetadata[shared.MetaKeyAnthropicPromptCacheKey])
 }

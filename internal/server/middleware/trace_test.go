@@ -406,7 +406,8 @@ func TestWithTrace_AnthropicPromptCacheDerivedTraceID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	config := tracing.Config{
-		TraceHeader: "AH-Trace-Id",
+		TraceHeader:                      "AH-Trace-Id",
+		AnthropicPromptCacheTraceEnabled: true,
 	}
 
 	router, client, traceService := setupTestTraceMiddleware(t)

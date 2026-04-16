@@ -224,7 +224,7 @@ func TestCodexOutbound_PrefersAnthropicPromptCacheKeyMetadata(t *testing.T) {
 		Messages:    []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("Hello")}}},
 		RequestType: llm.RequestTypeChat,
 		TransformerMetadata: map[string]any{
-			"anthropic_prompt_cache_key": "anthropic-cache-v2-stable",
+			shared.MetaKeyAnthropicPromptCacheKey: "anthropic-cache-v2-stable",
 		},
 	}
 

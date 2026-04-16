@@ -146,7 +146,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	reqCopy.PreviousResponseID = nil
 
 	if reqCopy.TransformerMetadata != nil {
-		if anthropicPromptCacheKey, ok := reqCopy.TransformerMetadata["anthropic_prompt_cache_key"].(string); ok && anthropicPromptCacheKey != "" {
+		if anthropicPromptCacheKey, ok := reqCopy.TransformerMetadata[shared.MetaKeyAnthropicPromptCacheKey].(string); ok && anthropicPromptCacheKey != "" {
 			reqCopy.PromptCacheKey = lo.ToPtr(anthropicPromptCacheKey)
 		}
 	}

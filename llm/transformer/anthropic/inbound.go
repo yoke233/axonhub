@@ -14,6 +14,7 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/internal/pkg/xjson"
 	transformer "github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 // InboundTransformer implements transformer.Inbound for Anthropic format.
@@ -134,13 +135,12 @@ func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *http
 	}
 
 	if anthropicReq.Metadata != nil && anthropicReq.Metadata.UserID != "" {
-		llmReq.TransformerMetadata["anthropic_metadata_user_id"] = anthropicReq.Metadata.UserID
+		llmReq.TransformerMetadata[shared.MetaKeyAnthropicMetadataUserID] = anthropicReq.Metadata.UserID
 	}
 
 	if llmReq.PromptCacheKey != nil && *llmReq.PromptCacheKey != "" {
-		llmReq.TransformerMetadata["anthropic_prompt_cache_key"] = *llmReq.PromptCacheKey
+		llmReq.TransformerMetadata[shared.MetaKeyAnthropicPromptCacheKey] = *llmReq.PromptCacheKey
 	}
-
 
 	return llmReq, nil
 }

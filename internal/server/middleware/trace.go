@@ -94,7 +94,7 @@ func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.Handle
 			traceID = tryExtractTraceIDFromCodexRequest(c)
 		}
 
-		if traceID == "" {
+		if traceID == "" && config.AnthropicPromptCacheTraceEnabled {
 			var err error
 
 			traceID, err = tryExtractAnthropicPromptCacheTraceID(c)
@@ -247,6 +247,7 @@ func buildAnthropicPromptCacheTraceID(req *anthropicfmt.MessageRequest) string {
 
 	return strings.Replace(key, "anthropic-cache-v2-", "at-apc-", 1)
 }
+
 // tryExtractTraceIDFromCodexRequest extracts the trace ID from the Codex session header.
 func tryExtractTraceIDFromCodexRequest(c *gin.Context) string {
 	traceID := codex.GetSessionIDFromHeaders(c.Request.Header)
