@@ -1,17 +1,20 @@
-# Publish Docker image
-# Copy from new-api 
-# https://github.com/QuantumNous/new-api/blob/main/.github/workflows/docker-image-arm64.yml
-
 name: Publish Docker image
 
 on:
   push:
+    branches:
+      - prod
     tags:
       - 'v*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build_single_arch:
-    name: Build & push (${{ matrix.arch }}) [native]
+    name: Build & push (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -34,39 +37,42 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Resolve tag & write VERSION
+      - name: Resolve version & write VERSION
         run: |
-          git fetch --tags --force --depth=1
-          TAG=${GITHUB_REF#refs/tags/}
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "$TAG" > internal/build/VERSION
-          echo "Building tag: $TAG for ${{ matrix.arch }}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "$VERSION" > internal/build/VERSION
+          echo "Building version: $VERSION for ${{ matrix.arch }}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata (labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            looplj/axonhub
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Build & push single-arch (to both registries)
+      - name: Build & push single-arch
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            looplj/axonhub:${{ env.TAG }}-${{ matrix.arch }}
-            looplj/axonhub:latest-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -74,30 +80,41 @@ jobs:
           sbom: false
 
   create_manifests:
-    name: Create multi-arch manifests (Docker Hub)
+    name: Create multi-arch manifests
     needs: [build_single_arch]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - name: Extract tag
-        run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
 
-      - name: Log in to Docker Hub
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Resolve version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(echo "$GITHUB_SHA" | cut -c1-7)
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create & push manifest (Docker Hub - version)
+      - name: Create & push manifest (version)
         run: |
           docker buildx imagetools create \
-            -t looplj/axonhub:${TAG} \
-            looplj/axonhub:${TAG}-amd64 \
-            looplj/axonhub:${TAG}-arm64
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION} \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-arm64
 
-      - name: Create & push manifest (Docker Hub - latest)
+      - name: Create & push manifest (latest)
         run: |
           docker buildx imagetools create \
-            -t looplj/axonhub:latest \
-            looplj/axonhub:latest-amd64 \
-            looplj/axonhub:latest-arm64
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-amd64 \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-arm64
