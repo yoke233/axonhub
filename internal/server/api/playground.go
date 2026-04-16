@@ -34,6 +34,7 @@ type PlaygroundHandlersParams struct {
 
 	ChannelService  *biz.ChannelService
 	ModelService    *biz.ModelService
+	DefaultSelector *orchestrator.DefaultSelector
 	RequestService  *biz.RequestService
 	SystemService   *biz.SystemService
 	UsageLogService *biz.UsageLogService
@@ -41,6 +42,7 @@ type PlaygroundHandlersParams struct {
 	PromptProtectionRuleService *biz.PromptProtectionRuleService
 	QuotaService    *biz.QuotaService
 	HttpClient      *httpclient.HttpClient
+	LiveStreamRegistry *biz.LiveStreamRegistry
 }
 
 type PlaygroundHandlers struct {
@@ -53,7 +55,7 @@ func NewPlaygroundHandlers(params PlaygroundHandlersParams) *PlaygroundHandlers 
 		ChannelService: params.ChannelService,
 		ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
 			params.ChannelService,
-			params.ModelService,
+			params.DefaultSelector,
 			params.RequestService,
 			params.HttpClient,
 			aisdk.NewDataStreamTransformer(),
@@ -62,6 +64,7 @@ func NewPlaygroundHandlers(params PlaygroundHandlersParams) *PlaygroundHandlers 
 			params.PromptService,
 			params.QuotaService,
 			params.PromptProtectionRuleService,
+			params.LiveStreamRegistry,
 		),
 	}
 }

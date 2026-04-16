@@ -44,7 +44,7 @@ func NewInboundPersistentStream(
 	perf *biz.PerformanceRecord,
 	state *PersistenceState,
 ) *InboundPersistentStream {
-	return &InboundPersistentStream{
+	s := &InboundPersistentStream{
 		ctx:            ctx,
 		stream:         stream,
 		request:        request,
@@ -56,6 +56,8 @@ func NewInboundPersistentStream(
 		closed:         false,
 		state:          state,
 	}
+
+	return s
 }
 
 func (ts *InboundPersistentStream) Next() bool {

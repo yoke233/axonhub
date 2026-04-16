@@ -22,6 +22,7 @@ type DoubaoHandlersParams struct {
 	VideoService    *biz.VideoService
 	ChannelService  *biz.ChannelService
 	ModelService    *biz.ModelService
+	DefaultSelector *orchestrator.DefaultSelector
 	RequestService  *biz.RequestService
 	SystemService   *biz.SystemService
 	UsageLogService *biz.UsageLogService
@@ -29,6 +30,7 @@ type DoubaoHandlersParams struct {
 	PromptProtectionRuleService *biz.PromptProtectionRuleService
 	QuotaService    *biz.QuotaService
 	HttpClient      *httpclient.HttpClient
+	LiveStreamRegistry *biz.LiveStreamRegistry
 }
 
 type DoubaoHandlers struct {
@@ -44,7 +46,7 @@ func NewDoubaoHandlers(params DoubaoHandlersParams) *DoubaoHandlers {
 		VideoService: params.VideoService,
 		CreateOrchestrator: orchestrator.NewChatCompletionOrchestrator(
 			params.ChannelService,
-			params.ModelService,
+			params.DefaultSelector,
 			params.RequestService,
 			params.HttpClient,
 			inbound,
@@ -53,6 +55,7 @@ func NewDoubaoHandlers(params DoubaoHandlersParams) *DoubaoHandlers {
 			params.PromptService,
 			params.QuotaService,
 			params.PromptProtectionRuleService,
+			params.LiveStreamRegistry,
 		),
 		InboundTransformer: inbound,
 	}

@@ -52,7 +52,7 @@ func NewOutboundPersistentStream(
 	perf *biz.PerformanceRecord,
 	state *PersistenceState,
 ) *OutboundPersistentStream {
-	return &OutboundPersistentStream{
+	s := &OutboundPersistentStream{
 		ctx:             ctx,
 		stream:          stream,
 		request:         request,
@@ -65,6 +65,8 @@ func NewOutboundPersistentStream(
 		closed:          false,
 		state:           state,
 	}
+
+	return s
 }
 
 func (ts *OutboundPersistentStream) Next() bool {
@@ -489,6 +491,16 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 
 	if errors.Is(err, errSkipCandidateByCircuitBreaker) {
 		return false
+	}
+
+	// Empty response detection: allow same-channel retry so the pipeline can
+	// re-execute the request against the same (or next model in the) channel.
+	if errors.Is(err, pipeline.ErrEmptyResponse) {
+		log.Debug(context.Background(), "empty response detected",
+			log.Int("channel_id", p.state.CurrentCandidate.Channel.ID),
+		)
+
+		return true
 	}
 
 	// 429 Too Many Requests: check if Retry-After header is present

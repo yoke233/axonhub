@@ -25,6 +25,7 @@ type BrandSettings {
 
 type StoragePolicy {
   storeChunks: Boolean!
+  livePreview: Boolean!
   storeRequestBody: Boolean!
   storeResponseBody: Boolean!
   cleanupOptions: [CleanupOption!]!
@@ -43,6 +44,7 @@ input UpdateBrandSettingsInput {
 
 input UpdateStoragePolicyInput {
   storeChunks: Boolean
+  livePreview: Boolean
   storeRequestBody: Boolean
   storeResponseBody: Boolean
   cleanupOptions: [CleanupOptionInput!]
@@ -121,6 +123,7 @@ type RetryPolicy {
   loadBalancerStrategy: String!
   enabled: Boolean!
   autoDisableChannel: AutoDisableChannel!
+  emptyResponseDetection: Boolean!
 }
 
 input AutoDisableChannelStatusInput {
@@ -140,6 +143,7 @@ input UpdateRetryPolicyInput {
   loadBalancerStrategy: String
   enabled: Boolean
   autoDisableChannel: AutoDisableChannelInput
+  emptyResponseDetection: Boolean
 }
 
 type SystemModelSettings {
@@ -310,6 +314,30 @@ type VersionCheck {
   releaseUrl: String!
 }
 
+enum DiagnosticsTarget {
+  CHANNEL_CACHE
+}
+
+input GetCacheDiagnosticsInput {
+  targets: [DiagnosticsTarget!]
+}
+
+input ClearCacheInput {
+  targets: [DiagnosticsTarget!]
+}
+
+type GetCacheDiagnosticsPayload {
+  fileName: String!
+  content: String!
+  targets: [DiagnosticsTarget!]!
+}
+
+type ClearCachePayload {
+  success: Boolean!
+  message: String!
+  targets: [DiagnosticsTarget!]!
+}
+
 extend type Query {
   systemStatus: SystemStatus!
   brandSettings: BrandSettings!
@@ -326,4 +354,9 @@ extend type Query {
   videoStorageSettings: VideoStorageSettings!
   proxyPresets: [ProxyPreset!]!
   userAgentPassThroughSettings: UserAgentPassThroughSettings!
+  getCacheDiagnostics(input: GetCacheDiagnosticsInput): GetCacheDiagnosticsPayload!
+}
+
+extend type Mutation {
+  clearCache(input: ClearCacheInput!): ClearCachePayload!
 }

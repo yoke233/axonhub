@@ -31,11 +31,12 @@ type RequestService struct {
 	SystemService      *SystemService
 	UsageLogService    *UsageLogService
 	DataStorageService *DataStorageService
+	LiveStreamRegistry *LiveStreamRegistry
 	channelCache       xcache.Cache[int]
 }
 
 // NewRequestService creates a new RequestService.
-func NewRequestService(ent *ent.Client, systemService *SystemService, usageLogService *UsageLogService, dataStorageService *DataStorageService) *RequestService {
+func NewRequestService(ent *ent.Client, systemService *SystemService, usageLogService *UsageLogService, dataStorageService *DataStorageService, liveStreamRegistry *LiveStreamRegistry) *RequestService {
 	return &RequestService{
 		AbstractService: &AbstractService{
 			db: ent,
@@ -43,6 +44,7 @@ func NewRequestService(ent *ent.Client, systemService *SystemService, usageLogSe
 		SystemService:      systemService,
 		UsageLogService:    usageLogService,
 		DataStorageService: dataStorageService,
+		LiveStreamRegistry: liveStreamRegistry,
 		channelCache: xcache.NewFromConfig[int](xcache.Config{
 			Mode: xcache.ModeMemory,
 			Memory: xcache.MemoryConfig{
@@ -350,6 +352,7 @@ func (s *RequestService) CreateRequestExecution(
 type LatencyMetrics struct {
 	LatencyMs           *int64
 	FirstTokenLatencyMs *int64
+	ReasoningDurationMs *int64
 }
 
 // UpdateRequestCompleted updates request status to completed with response body.
@@ -398,6 +401,10 @@ func (s *RequestService) UpdateRequestCompleted(
 
 		if metrics.FirstTokenLatencyMs != nil {
 			upd = upd.SetMetricsFirstTokenLatencyMs(*metrics.FirstTokenLatencyMs)
+		}
+
+		if metrics.ReasoningDurationMs != nil {
+			upd = upd.SetMetricsReasoningDurationMs(*metrics.ReasoningDurationMs)
 		}
 	}
 
@@ -482,6 +489,10 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 		if metrics.FirstTokenLatencyMs != nil {
 			upd = upd.SetMetricsFirstTokenLatencyMs(*metrics.FirstTokenLatencyMs)
 		}
+
+		if metrics.ReasoningDurationMs != nil {
+			upd = upd.SetMetricsReasoningDurationMs(*metrics.ReasoningDurationMs)
+		}
 	}
 
 	if storeResponseBody {
@@ -562,6 +573,10 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 
 		if metrics.FirstTokenLatencyMs != nil {
 			upd = upd.SetMetricsFirstTokenLatencyMs(*metrics.FirstTokenLatencyMs)
+		}
+
+		if metrics.ReasoningDurationMs != nil {
+			upd = upd.SetMetricsReasoningDurationMs(*metrics.ReasoningDurationMs)
 		}
 	}
 
@@ -1039,6 +1054,11 @@ func (s *RequestService) LoadResponseChunks(ctx context.Context, req *ent.Reques
 	if req == nil {
 		return nil, fmt.Errorf("request is nil")
 	}
+	// Live preview for active streaming requests
+	if req.Stream && req.Status == request.StatusProcessing {
+		chunks := s.LiveStreamRegistry.GetRequestChunks(req.ID)
+		return chunks, nil
+	}
 	// Only load response chunks if request is completed and streaming.
 	if !req.Stream || req.Status != request.StatusCompleted {
 		return []objects.JSONRawMessage{}, nil
@@ -1155,6 +1175,11 @@ func (s *RequestService) LoadRequestExecutionResponseChunks(ctx context.Context,
 		return nil, fmt.Errorf("request execution is nil")
 	}
 
+	// Live preview for active streaming executions
+	if exec.Stream && exec.Status == requestexecution.StatusProcessing {
+		chunks := s.LiveStreamRegistry.GetExecutionChunks(exec.ID)
+		return chunks, nil
+	}
 	// Only load response body if execution is completed
 	if !exec.Stream || exec.Status != requestexecution.StatusCompleted {
 		return []objects.JSONRawMessage{}, nil
