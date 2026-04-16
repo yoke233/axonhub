@@ -69,6 +69,7 @@ func NewChatCompletionOrchestrator(
 		PipelineFactory:            pipeline.NewFactory(httpClient),
 		ModelMapper:                NewModelMapper(),
 		channelSelector:            defaultSelector,
+		channelAffinityStore:       NewChannelAffinityStore(),
 		connectionTracker:          connectionTracker,
 		rateLimitTracker:           rateLimitTracker,
 		adaptiveLoadBalancer:       adaptiveLoadBalancer,
@@ -97,6 +98,8 @@ type ChatCompletionOrchestrator struct {
 
 	// The default channel selector.
 	channelSelector CandidateSelector
+	// The channel affinity store for session-aware routing.
+	channelAffinityStore *ChannelAffinityStore
 	// The load balancer for channel load balancing.
 	adaptiveLoadBalancer       *LoadBalancer
 	failoverLoadBalancer       *LoadBalancer
@@ -214,7 +217,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		enforceQuota(inbound, processor.QuotaService),
 		checkApiKeyModelAccess(inbound),
 		applyModelMapping(inbound),
-		selectCandidates(inbound),
+		selectCandidates(inbound, processor.channelAffinityStore),
 		injectPrompts(inbound),
 		protectPrompts(inbound),
 		persistRequest(inbound),
@@ -222,6 +225,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 
 	// Add outbound middlewares (executed after outbound.TransformRequest)
 	middlewares = append(middlewares,
+		recordChannelAffinity(outbound, processor.channelAffinityStore),
 		applyOverrideRequestBody(outbound),
 		// applyUserAgentPassThrough runs before header overrides to set the initial
 		// User-Agent value (either from client pass-through or default "axonhub/1.0").
