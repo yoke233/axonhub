@@ -160,3 +160,4 @@ config.schema.json
 *.db-wal
 *.agent/summary
 .factory
+.harness/
