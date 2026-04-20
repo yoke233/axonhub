@@ -600,6 +600,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 			}
 
 			ch.Outbound = transformer
+			svc.useUTLSForCodex(ch)
 			setupAutoRefresh(ch, p, oauth.AutoRefreshOptions{})
 
 			return ch, nil
@@ -620,6 +621,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 		}
 
 		ch.Outbound = transformer
+		svc.useUTLSForCodex(ch)
 
 		return ch, nil
 	case channel.TypeGithubCopilot:
@@ -782,6 +784,21 @@ func extractProjectIDFromAntigravityCreds(apiKey string) (string, error) {
 		return parts[1], nil
 	}
 	return "", errors.New("api key does not contain project ID (expected format: \"<refreshToken>|<projectID>\")")
+}
+
+// useUTLSForCodex wraps the channel's HTTPClient with a uTLS-backed http.Client so the
+// outbound TLS ClientHello blends in with mainstream Chrome traffic instead of the very
+// distinctive Go net/http fingerprint. Scoped to codex channels because that's where
+// the upstream (chatgpt.com backend-api) is most likely to fingerprint TLS as a way to
+// detect API-style usage of subscription accounts. Other channels keep the regular
+// httpclient to limit blast radius and avoid surprising network behavior elsewhere.
+func (svc *ChannelService) useUTLSForCodex(ch *Channel) {
+	var proxyConfig *httpclient.ProxyConfig
+	if ch.Settings != nil {
+		proxyConfig = ch.Settings.Proxy
+	}
+	utlsHTTPClient := codex.NewUTLSHTTPClient(httpclient.ProxyFunc(proxyConfig))
+	ch.HTTPClient = httpclient.NewHttpClientWithClient(utlsHTTPClient)
 }
 
 // ensureCodexInstallationID returns the channel's persisted codex installation id,

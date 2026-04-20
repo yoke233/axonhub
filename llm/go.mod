@@ -25,10 +25,12 @@ require (
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
+	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/aptible/supercronic v0.2.32 // indirect
 	github.com/aws/smithy-go v1.24.3 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cloudflare/circl v1.3.7 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dubbogo/gost v1.14.0 // indirect
 	github.com/dubbogo/timer v0.1.0 // indirect
@@ -40,10 +42,12 @@ require (
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0 // indirect
 	github.com/k0kubun/pp v3.0.1+incompatible // indirect
+	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/refraction-networking/utls v1.6.7 // indirect
 	github.com/segmentio/fasthash v1.0.3 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

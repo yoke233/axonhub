@@ -83,6 +83,13 @@ func (hc *HttpClient) GetNativeClient() *http.Client {
 	return hc.client
 }
 
+// ProxyFunc returns a proxy resolver function for the given config. Exported so other
+// packages (e.g. llm/transformer/openai/codex for the uTLS transport) can plug the same
+// proxy semantics into a custom http.Transport without re-implementing the resolution.
+func ProxyFunc(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
+	return getProxyFunc(config)
+}
+
 // getProxyFunc returns a proxy function based on the proxy configuration.
 func getProxyFunc(config *ProxyConfig) func(*http.Request) (*url.URL, error) {
 	// Handle nil config (backward compatibility) - default to environment
