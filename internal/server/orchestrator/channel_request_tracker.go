@@ -9,9 +9,10 @@ import (
 // within a fixed 1-minute sliding window for rate limiting.
 // It also manages cooldown periods for channels that received 429 errors.
 type ChannelRequestTracker struct {
-	mu        sync.RWMutex
-	counters  map[int]*rateLimitWindow // channelID -> window
-	cooldowns map[int]time.Time        // channelID -> cooldown expiration time
+	mu           sync.RWMutex
+	counters     map[int]*rateLimitWindow // channelID -> per-minute window
+	dailyTokens  map[int]*dailyTokenWindow // channelID -> per-UTC-day token counter
+	cooldowns    map[int]time.Time         // channelID -> cooldown expiration time
 }
 
 type rateLimitWindow struct {
@@ -20,12 +21,60 @@ type rateLimitWindow struct {
 	windowStart time.Time
 }
 
+// dailyTokenWindow tracks token usage in a UTC-day rolling window. Used to enforce
+// per-channel daily budgets (e.g. preventing a codex subscription account from blowing
+// through its quota in a single hour and getting flagged).
+type dailyTokenWindow struct {
+	tokens int64
+	day    string // UTC date in YYYY-MM-DD form
+}
+
 // NewChannelRequestTracker creates a new rate limit tracker.
 func NewChannelRequestTracker() *ChannelRequestTracker {
 	return &ChannelRequestTracker{
-		counters:  make(map[int]*rateLimitWindow),
-		cooldowns: make(map[int]time.Time),
+		counters:    make(map[int]*rateLimitWindow),
+		dailyTokens: make(map[int]*dailyTokenWindow),
+		cooldowns:   make(map[int]time.Time),
 	}
+}
+
+func currentUTCDay() string {
+	return time.Now().UTC().Format("2006-01-02")
+}
+
+// AddDailyTokens adds token usage to the per-channel UTC-day rolling counter.
+// Negative or zero increments are ignored.
+func (t *ChannelRequestTracker) AddDailyTokens(channelID int, tokens int64) {
+	if tokens <= 0 {
+		return
+	}
+
+	day := currentUTCDay()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	w, ok := t.dailyTokens[channelID]
+	if !ok || w.day != day {
+		w = &dailyTokenWindow{day: day}
+		t.dailyTokens[channelID] = w
+	}
+	w.tokens += tokens
+}
+
+// GetDailyTokenCount returns the token count consumed today (UTC) for a channel.
+// Returns 0 if the channel has no usage today or the previous day's counter has
+// rolled over.
+func (t *ChannelRequestTracker) GetDailyTokenCount(channelID int) int64 {
+	t.mu.RLock()
+	w, ok := t.dailyTokens[channelID]
+	t.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	if w.day != currentUTCDay() {
+		return 0
+	}
+	return w.tokens
 }
 
 // getOrResetWindow returns the current window for a channel, resetting if expired.
@@ -51,17 +100,27 @@ func (t *ChannelRequestTracker) IncrementRequest(channelID int) {
 	w.requests++
 }
 
-// AddTokens adds token count for a channel.
+// AddTokens adds token count for a channel. Updates BOTH the per-minute window
+// (used for TPM enforcement) and the per-UTC-day window (used for DailyTokenLimit
+// enforcement). Negative or zero increments are ignored.
 func (t *ChannelRequestTracker) AddTokens(channelID int, tokens int64) {
 	if tokens <= 0 {
 		return
 	}
 
+	day := currentUTCDay()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	w := t.getOrResetWindow(channelID)
 	w.tokens += tokens
+
+	dw, ok := t.dailyTokens[channelID]
+	if !ok || dw.day != day {
+		dw = &dailyTokenWindow{day: day}
+		t.dailyTokens[channelID] = dw
+	}
+	dw.tokens += tokens
 }
 
 // GetRequestCount returns the current request count for a channel in the current window.

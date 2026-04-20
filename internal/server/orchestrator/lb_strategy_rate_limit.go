@@ -116,6 +116,21 @@ func (s *RateLimitAwareStrategy) Score(ctx context.Context, channel *biz.Channel
 		}
 	}
 
+	// Check DailyTokenLimit (UTC day rolling).
+	// Useful for rationing subscription accounts (e.g. codex via OAuth) so we don't
+	// blow through the upstream daily quota in a few hours and trigger a flag.
+	if rl.DailyTokenLimit != nil && *rl.DailyTokenLimit > 0 {
+		daily := s.requestTracker.GetDailyTokenCount(channel.ID)
+		if daily >= *rl.DailyTokenLimit {
+			return rateLimitExhaustedScore
+		}
+
+		ratio := float64(daily) / float64(*rl.DailyTokenLimit)
+		if ratio > maxRatio {
+			maxRatio = ratio
+		}
+	}
+
 	if s.connectionTracker != nil {
 		if concurrencyLimit, _, _ := s.resolveConcurrencyLimit(channel); concurrencyLimit > 0 {
 			concurrent := s.connectionTracker.GetActiveConnections(channel.ID)
@@ -248,6 +263,23 @@ func (s *RateLimitAwareStrategy) ScoreWithDebug(ctx context.Context, channel *bi
 			details["tpm_exhausted"] = true
 		} else {
 			ratio := float64(tpm) / float64(*rl.TPM)
+			if ratio > maxRatio {
+				maxRatio = ratio
+			}
+		}
+	}
+
+	// Check DailyTokenLimit (UTC day rolling).
+	if rl.DailyTokenLimit != nil && *rl.DailyTokenLimit > 0 {
+		daily := s.requestTracker.GetDailyTokenCount(channel.ID)
+		details["daily_token_limit"] = *rl.DailyTokenLimit
+		details["daily_tokens_current"] = daily
+
+		if daily >= *rl.DailyTokenLimit {
+			exhausted = true
+			details["daily_token_exhausted"] = true
+		} else {
+			ratio := float64(daily) / float64(*rl.DailyTokenLimit)
 			if ratio > maxRatio {
 				maxRatio = ratio
 			}
