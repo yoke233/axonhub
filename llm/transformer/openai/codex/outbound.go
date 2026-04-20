@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/samber/lo"
 
 	"github.com/looplj/axonhub/llm"
@@ -16,7 +15,6 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 const (
@@ -155,17 +153,12 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	reqCopy.Metadata = nil
 	reqCopy.PreviousResponseID = nil
 
-	if reqCopy.TransformerMetadata != nil {
-		if anthropicPromptCacheKey, ok := reqCopy.TransformerMetadata[shared.MetaKeyAnthropicPromptCacheKey].(string); ok && anthropicPromptCacheKey != "" {
-			reqCopy.PromptCacheKey = lo.ToPtr(anthropicPromptCacheKey)
-		}
-	}
-
-	if reqCopy.PromptCacheKey == nil || *reqCopy.PromptCacheKey == "" {
-		if sessionID, ok := shared.GetSessionID(ctx); ok && sessionID != "" {
-			reqCopy.PromptCacheKey = lo.ToPtr(sessionID)
-		}
-	}
+	// Resolve a single conversation key (passthrough-first) and apply it consistently to
+	// both the body's prompt_cache_key and the outgoing Session_id header. Real codex_cli_rs
+	// keeps these equal (codex-rs/core/src/client.rs:853 sets prompt_cache_key from
+	// conversation_id, and codex-api headers.rs:8 sets session_id from the same value).
+	conversationKey := resolveConversationKey(ctx, rawSessionID, rawTurnMetadata, reqCopy.TransformerMetadata, reqCopy.PromptCacheKey)
+	reqCopy.PromptCacheKey = lo.ToPtr(conversationKey)
 
 	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
 	if err != nil {
@@ -201,19 +194,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
-	if rawSessionID != "" {
-		hreq.Headers.Set(SessionHeader, rawSessionID)
-	} else if sessionID := ExtractSessionIDFromTurnMetadata(rawTurnMetadata); sessionID != "" {
-		hreq.Headers.Set(SessionHeader, sessionID)
-	} else if reqCopy.PromptCacheKey != nil && *reqCopy.PromptCacheKey != "" {
-		hreq.Headers.Set(SessionHeader, *reqCopy.PromptCacheKey)
-	} else if hreq.Headers.Get(SessionHeader) == "" {
-		if sessionID, ok := shared.GetSessionID(ctx); ok {
-			hreq.Headers.Set(SessionHeader, sessionID)
-		} else {
-			hreq.Headers.Set(SessionHeader, uuid.NewString())
-		}
-	}
+	// Session_id header MUST equal body.prompt_cache_key — this is the real CLI invariant.
+	hreq.Headers.Set(SessionHeader, conversationKey)
 
 	if accountID != "" {
 		hreq.Headers.Set("Chatgpt-Account-Id", accountID)
