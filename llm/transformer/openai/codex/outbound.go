@@ -176,8 +176,13 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	} else {
 		hreq.Headers.Set("Originator", DefaultOriginator)
 	}
+	// Passthrough-first: real codex CLI users already have a proper UA. Fall back to a
+	// codex_cli_rs-shaped UA only when the caller did not supply one. Avoid leaking the
+	// Go default UA "Go-http-client/1.1".
 	if rawUserAgent != "" {
 		hreq.Headers.Set("User-Agent", rawUserAgent)
+	} else {
+		hreq.Headers.Set("User-Agent", BuildDefaultCodexUserAgent())
 	}
 
 	for _, header := range PassthroughHeaders {
