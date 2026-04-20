@@ -23,7 +23,12 @@ func DefaultModels() []string {
 }
 
 const (
-	AxonHubOriginator = "axonhub"
+	// DefaultOriginator matches the real OpenAI Codex CLI value (codex-rs/login).
+	// Using "axonhub" here is an obvious upstream-side fingerprint; the CLI sends "codex_cli_rs".
+	DefaultOriginator = "codex_cli_rs"
+	// AxonHubOriginator is kept as a deprecated alias for any external import.
+	// Deprecated: use DefaultOriginator.
+	AxonHubOriginator = DefaultOriginator
 	AuthorizeURL      = "https://auth.openai.com/oauth/authorize"
 	//nolint:gosec // false alert.
 	TokenURL    = "https://auth.openai.com/oauth/token"

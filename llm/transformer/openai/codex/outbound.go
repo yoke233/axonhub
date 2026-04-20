@@ -174,7 +174,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if rawOriginator != "" {
 		hreq.Headers.Set("Originator", rawOriginator)
 	} else {
-		hreq.Headers.Set("Originator", AxonHubOriginator)
+		hreq.Headers.Set("Originator", DefaultOriginator)
 	}
 	if rawUserAgent != "" {
 		hreq.Headers.Set("User-Agent", rawUserAgent)
