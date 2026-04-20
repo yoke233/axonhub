@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/log"
@@ -591,6 +593,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 				TokenProvider:   p,
 				BaseURL:         c.BaseURL,
 				AccountIdentity: accountIdentity,
+				InstallationID:  svc.ensureCodexInstallationID(c),
 			})
 			if err != nil {
 				return nil, fmt.Errorf("failed to create codex outbound transformer: %w", err)
@@ -610,6 +613,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 			TokenProvider:   tokens,
 			BaseURL:         c.BaseURL,
 			AccountIdentity: accountIdentity,
+			InstallationID:  svc.ensureCodexInstallationID(c),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create codex outbound transformer: %w", err)
@@ -778,6 +782,38 @@ func extractProjectIDFromAntigravityCreds(apiKey string) (string, error) {
 		return parts[1], nil
 	}
 	return "", errors.New("api key does not contain project ID (expected format: \"<refreshToken>|<projectID>\")")
+}
+
+// ensureCodexInstallationID returns the channel's persisted codex installation id,
+// generating and persisting one on first use. Mirrors codex_cli_rs ~/.codex/installation_id
+// so that requests carry a stable per-channel "device" UUID, both as an HTTP header and
+// inside body.client_metadata. Failure to persist is logged but not fatal — the in-memory
+// id still flows to the transformer so the request itself is fingerprint-correct.
+func (svc *ChannelService) ensureCodexInstallationID(c *ent.Channel) string {
+	settings := c.Settings
+	if settings == nil {
+		settings = &objects.ChannelSettings{}
+	}
+
+	if id := strings.TrimSpace(settings.CodexInstallationID); id != "" {
+		return id
+	}
+
+	newID := uuid.NewString()
+	settings.CodexInstallationID = newID
+	c.Settings = settings
+
+	if svc.db != nil {
+		_, err := svc.db.Channel.UpdateOneID(c.ID).SetSettings(settings).Save(context.Background())
+		if err != nil {
+			log.Warn(context.Background(), "failed to persist codex installation id; using transient value",
+				log.Int("channel_id", c.ID),
+				log.String("channel", c.Name),
+				log.Cause(err))
+		}
+	}
+
+	return newID
 }
 
 func (svc *ChannelService) refreshOAuthToken(ctx context.Context, ch *ent.Channel, refreshed *oauth.OAuthCredentials) error {

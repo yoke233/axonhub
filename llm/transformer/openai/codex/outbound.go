@@ -31,6 +31,10 @@ const (
 type OutboundTransformer struct {
 	tokens oauth.TokenGetter
 
+	// installationID is the channel-scoped fallback used when the caller did not
+	// supply 'x-codex-installation-id'. Mirrors codex_cli_rs ~/.codex/installation_id.
+	installationID string
+
 	// reuse existing Responses outbound for payload building.
 	responsesOutbound *responses.OutboundTransformer
 }
@@ -44,6 +48,11 @@ type Params struct {
 	TokenProvider   oauth.TokenGetter
 	BaseURL         string
 	AccountIdentity string
+	// InstallationID is the channel-scoped fallback "device" UUID. Mirrors the value
+	// real codex_cli_rs reads from ~/.codex/installation_id and sends in both the
+	// 'x-codex-installation-id' header and body.client_metadata.
+	// When the inbound caller already supplies the header, the caller value wins.
+	InstallationID string
 }
 
 func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
@@ -70,6 +79,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 
 	return &OutboundTransformer{
 		tokens:            params.TokenProvider,
+		installationID:    params.InstallationID,
 		responsesOutbound: ro,
 	}, nil
 }
@@ -207,6 +217,14 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	if accountID != "" {
 		hreq.Headers.Set("Chatgpt-Account-Id", accountID)
+	}
+
+	// Resolve installation id (passthrough-first, channel fallback) and ensure both the
+	// header and body.client_metadata carry the same value, matching real codex_cli_rs.
+	installationID := resolveInstallationID(rawHeaders.Get(InstallationIDHeader), t.installationID)
+	if installationID != "" {
+		hreq.Headers.Set(InstallationIDHeader, installationID)
+		hreq.Body = injectInstallationIDIntoBody(hreq.Body, installationID)
 	}
 
 	return hreq, nil

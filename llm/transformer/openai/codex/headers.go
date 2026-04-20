@@ -7,11 +7,15 @@ import (
 )
 
 const (
-	SessionHeader          = "Session_id"
-	TurnMetadataHeader     = "X-Codex-Turn-Metadata"
-	WindowIDHeader         = "X-Codex-Window-Id"
-	ClientRequestIDHeader  = "X-Client-Request-Id"
-	BetaFeaturesHeader     = "X-Codex-Beta-Features"
+	SessionHeader         = "Session_id"
+	TurnMetadataHeader    = "X-Codex-Turn-Metadata"
+	WindowIDHeader        = "X-Codex-Window-Id"
+	ClientRequestIDHeader = "X-Client-Request-Id"
+	BetaFeaturesHeader    = "X-Codex-Beta-Features"
+	// InstallationIDHeader matches codex-rs/core/src/client.rs X_CODEX_INSTALLATION_ID_HEADER.
+	// Real codex_cli_rs sends this on every Responses API call AND duplicates it under
+	// body.client_metadata.x-codex-installation-id (per codex-rs/core/src/client.rs:872-875).
+	InstallationIDHeader = "X-Codex-Installation-Id"
 )
 
 type TurnMetadata struct {
@@ -23,6 +27,7 @@ var PassthroughHeaders = []string{
 	WindowIDHeader,
 	ClientRequestIDHeader,
 	BetaFeaturesHeader,
+	InstallationIDHeader,
 }
 
 func ExtractSessionIDFromTurnMetadata(raw string) string {

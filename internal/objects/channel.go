@@ -142,6 +142,14 @@ type ChannelSettings struct {
 	// RateLimit configures the upstream rate limit for the channel.
 	// When configured, the load balancer will skip channels that have exceeded their rate limits.
 	RateLimit *ChannelRateLimit `json:"rateLimit,omitempty"`
+
+	// CodexInstallationID is the per-channel "device" UUID injected as the
+	// 'x-codex-installation-id' header AND body.client_metadata.x-codex-installation-id
+	// when calling the ChatGPT codex backend, mirroring the real codex_cli_rs behavior
+	// (see codex-rs/core/src/installation_id.rs). Generated and persisted on first use
+	// when missing. If the inbound caller already supplies this header, the caller value
+	// wins and this fallback is ignored.
+	CodexInstallationID string `json:"codexInstallationId,omitempty"`
 }
 
 type ChannelRateLimit struct {
