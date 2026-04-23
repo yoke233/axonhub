@@ -279,6 +279,65 @@ func (p *TokenProvider) EnsureFresh(ctx context.Context, refreshBefore time.Dura
 	return fresh, nil
 }
 
+// RefreshNow forces an OAuth token refresh even when the current access token has
+// not reached its normal refresh window yet. This is used for 401 recovery paths
+// where the upstream has already rejected the token and waiting for expiry is wrong.
+func (p *TokenProvider) RefreshNow(ctx context.Context) (*OAuthCredentials, error) {
+	p.mu.RLock()
+	creds := p.creds
+	p.mu.RUnlock()
+
+	if creds == nil {
+		return nil, fmt.Errorf("credentials is nil")
+	}
+
+	if creds.RefreshToken == "" {
+		return nil, fmt.Errorf("refresh_token is empty")
+	}
+
+	v, err, _ := p.sf.Do("refresh", func() (any, error) {
+		p.mu.RLock()
+		current := p.creds
+		onRefreshed := p.onRefreshed
+		p.mu.RUnlock()
+
+		if current == nil {
+			return nil, fmt.Errorf("credentials is nil")
+		}
+
+		if current.RefreshToken == "" {
+			return nil, fmt.Errorf("refresh_token is empty")
+		}
+
+		fresh, err := p.refresh(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+
+		p.mu.Lock()
+		p.creds = fresh
+		p.mu.Unlock()
+
+		if onRefreshed != nil {
+			if err := onRefreshed(ctx, fresh); err != nil {
+				slog.WarnContext(ctx, "failed to persist refreshed credentials", slog.Any("error", err))
+			}
+		}
+
+		return fresh, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fresh, ok := v.(*OAuthCredentials)
+	if !ok {
+		return nil, fmt.Errorf("singleflight returned unexpected type %T", v)
+	}
+
+	return fresh, nil
+}
+
 func (p *TokenProvider) StartAutoRefresh(ctx context.Context, opts AutoRefreshOptions) {
 	slog.DebugContext(ctx, "start auto refresh token provider")
 

@@ -46,3 +46,54 @@ func TestUserAgent_DefaultWhenAbsent(t *testing.T) {
 	assert.NotEqual(t, "axonhub/1.0", finalReq.Header.Get("User-Agent"),
 		"default UA must no longer be axonhub/1.0")
 }
+
+func TestUserAgent_UsesTERMProgramToken(t *testing.T) {
+	clearKnownTerminalEnv(t)
+	t.Setenv("TERM_PROGRAM", "WarpTerminal")
+	t.Setenv("TERM_PROGRAM_VERSION", "1.2.3")
+
+	ua := BuildDefaultCodexUserAgent()
+	assert.Contains(t, ua, " WarpTerminal/1.2.3")
+}
+
+func TestUserAgent_FallsBackToTERM(t *testing.T) {
+	clearKnownTerminalEnv(t)
+	t.Setenv("TERM", "xterm-256color")
+
+	ua := BuildDefaultCodexUserAgent()
+	assert.Contains(t, ua, " xterm-256color")
+}
+
+func TestUserAgent_SanitizesTerminalToken(t *testing.T) {
+	clearKnownTerminalEnv(t)
+	t.Setenv("TERM_PROGRAM", "bad\rterm")
+	t.Setenv("TERM_PROGRAM_VERSION", "1.0\nbeta")
+
+	ua := BuildDefaultCodexUserAgent()
+	assert.NotContains(t, ua, "\r")
+	assert.NotContains(t, ua, "\n")
+	assert.Contains(t, ua, " bad_term/1.0_beta")
+}
+
+func clearKnownTerminalEnv(t *testing.T) {
+	t.Helper()
+
+	for _, key := range []string{
+		"TERM",
+		"TERM_PROGRAM",
+		"TERM_PROGRAM_VERSION",
+		"WEZTERM_VERSION",
+		"ITERM_SESSION_ID",
+		"ITERM_PROFILE",
+		"ITERM_PROFILE_NAME",
+		"TERM_SESSION_ID",
+		"KITTY_WINDOW_ID",
+		"ALACRITTY_SOCKET",
+		"KONSOLE_VERSION",
+		"GNOME_TERMINAL_SCREEN",
+		"VTE_VERSION",
+		"WT_SESSION",
+	} {
+		t.Setenv(key, "")
+	}
+}

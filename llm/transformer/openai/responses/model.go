@@ -667,8 +667,11 @@ type ContentItem struct {
 }
 
 type Error struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Type     string  `json:"type,omitempty"`
+	Code     string  `json:"code,omitempty"`
+	Message  string  `json:"message,omitempty"`
+	PlanType *string `json:"plan_type,omitempty"`
+	ResetsAt *int64  `json:"resets_at,omitempty"`
 }
 
 type rawJSONSchema struct {

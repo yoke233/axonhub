@@ -22,6 +22,7 @@ import (
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/transformer"
+	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 )
 
 // ChannelModelEntry represents a model that the channel can handle.
@@ -81,18 +82,23 @@ type ChannelServiceParams struct {
 }
 
 func NewChannelService(params ChannelServiceParams) *ChannelService {
+	codexSessionIDCacheMode := normalizeCodexSessionIDCacheMode(params.CacheConfig.Mode)
+
 	svc := &ChannelService{
 		AbstractService: &AbstractService{
 			db: params.Ent,
 		},
-		Executors:          params.Executor,
-		SystemService:      params.SystemService,
-		WebhookNotifier:    params.WebhookNotifier,
-		httpClient:         params.HttpClient,
-		channelPerfMetrics: make(map[int]*channelMetrics),
-		channelErrorCounts: make(map[int]map[int]int),
-		apiKeyErrorCounts:  make(map[int]map[string]map[int]int),
-		perfCh:             make(chan *PerformanceRecord, 1024),
+		Executors:                 params.Executor,
+		SystemService:             params.SystemService,
+		WebhookNotifier:           params.WebhookNotifier,
+		httpClient:                params.HttpClient,
+		codexSessionIDCache:       newCodexSessionIDCache(params.CacheConfig),
+		codexSessionIDCacheMode:   codexSessionIDCacheMode,
+		codexSessionIDCacheShared: isSharedCodexSessionIDCacheMode(codexSessionIDCacheMode),
+		channelPerfMetrics:        make(map[int]*channelMetrics),
+		channelErrorCounts:        make(map[int]map[int]int),
+		apiKeyErrorCounts:         make(map[int]map[string]map[int]int),
+		perfCh:                    make(chan *PerformanceRecord, 1024),
 	}
 	svc.initChannelPerformances(context.Background())
 
@@ -148,7 +154,11 @@ type ChannelService struct {
 	SystemService   *SystemService
 	WebhookNotifier *WebhookNotifier
 
-	httpClient *httpclient.HttpClient
+	httpClient                  *httpclient.HttpClient
+	codexSessionIDCache         codex.SessionIDCache
+	codexSessionIDCacheMode     string
+	codexSessionIDCacheShared   bool
+	codexSessionIDCacheWarnOnce sync.Once
 
 	enabledChannelsCache *live.Cache[[]*Channel]
 	channelNotifier      watcher.Notifier[live.CacheEvent[struct{}]]
@@ -182,6 +192,18 @@ type ChannelService struct {
 
 	// perfCh is the channel for performance records for async processing.
 	perfCh chan *PerformanceRecord
+}
+
+func normalizeCodexSessionIDCacheMode(mode string) string {
+	if mode == "" {
+		return xcache.ModeMemory
+	}
+
+	return mode
+}
+
+func isSharedCodexSessionIDCacheMode(mode string) bool {
+	return mode == xcache.ModeRedis || mode == xcache.ModeTwoLevel
 }
 
 func (svc *ChannelService) reloadEnabledChannels(ctx context.Context, current []*Channel, lastUpdate time.Time) ([]*Channel, time.Time, bool, error) {

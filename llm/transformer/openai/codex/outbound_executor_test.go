@@ -169,6 +169,24 @@ func (m *mockCodexExecutor) DoStream(_ context.Context, _ *httpclient.Request) (
 	return streams.SliceStream(m.streamEvents), nil
 }
 
+type eagerRefreshTokenGetter struct {
+	creds             *oauth.OAuthCredentials
+	ensureCalls       int
+	getCalls          int
+	lastRefreshBefore time.Duration
+}
+
+func (g *eagerRefreshTokenGetter) Get(_ context.Context) (*oauth.OAuthCredentials, error) {
+	g.getCalls++
+	return g.creds, nil
+}
+
+func (g *eagerRefreshTokenGetter) EnsureFresh(_ context.Context, refreshBefore time.Duration) (*oauth.OAuthCredentials, error) {
+	g.ensureCalls++
+	g.lastRefreshBefore = refreshBefore
+	return g.creds, nil
+}
+
 func TestCodexOutbound_DoesNotInjectCLIInstructions(t *testing.T) {
 	ctx := context.Background()
 	outbound := newTestCodexOutbound(t)
@@ -191,6 +209,78 @@ func TestCodexOutbound_DoesNotInjectCLIInstructions(t *testing.T) {
 	assert.NotContains(t, string(hreq.Body), "You are a coding agent running in the Codex CLI")
 	assert.NotContains(t, string(hreq.Body), "You are Codex")
 	assert.Equal(t, false, body["store"])
+}
+
+func TestCodexOutbound_UsesEnsureFreshWhenAvailable(t *testing.T) {
+	ctx := context.Background()
+	getter := &eagerRefreshTokenGetter{
+		creds: &oauth.OAuthCredentials{
+			AccessToken:  testAccessTokenWithAccountID(t),
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(10 * time.Minute),
+		},
+	}
+
+	outbound, err := NewOutboundTransformer(Params{
+		BaseURL:       "https://chatgpt.com/backend-api/codex#",
+		TokenProvider: getter,
+	})
+	require.NoError(t, err)
+
+	_, err = outbound.TransformRequest(ctx, &llm.Request{
+		Model: "gpt-5-codex",
+		Messages: []llm.Message{{
+			Role:    "user",
+			Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+		}},
+		Stream: lo.ToPtr(true),
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, getter.ensureCalls)
+	assert.Equal(t, 0, getter.getCalls)
+	assert.Equal(t, RequestRefreshBefore, getter.lastRefreshBefore)
+}
+
+func TestCodexOutbound_PreservesCallerBodyFieldsAndSetsCodexHeaders(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+	retention := "24h"
+	safetyIdentifier := "user-test"
+	previousResponseID := "resp_prev_123"
+
+	hreq, err := outbound.TransformRequest(ctx, &llm.Request{
+		Model: "gpt-5-codex",
+		Messages: []llm.Message{{
+			Role:    "user",
+			Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+		}},
+		Stream:             lo.ToPtr(true),
+		SafetyIdentifier:   &safetyIdentifier,
+		StreamOptions:      &llm.StreamOptions{IncludeUsage: true},
+		PreviousResponseID: &previousResponseID,
+		TransformerMetadata: map[string]any{
+			"prompt_cache_retention": &retention,
+			"include_obfuscation":    true,
+		},
+		RawRequest: &httpclient.Request{
+			Headers: http.Header{
+				VersionHeader:   []string{"9.9.9"},
+				TurnStateHeader: []string{"turn-state-123"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	body := decodeCodexRequestBody(t, hreq)
+
+	assert.Equal(t, "9.9.9", hreq.Headers.Get(VersionHeader))
+	assert.Equal(t, "turn-state-123", hreq.Headers.Get(TurnStateHeader))
+	assert.Equal(t, "Keep-Alive", hreq.Headers.Get("Connection"))
+	assert.Equal(t, retention, body["prompt_cache_retention"])
+	assert.Equal(t, safetyIdentifier, body["safety_identifier"])
+	assert.Equal(t, previousResponseID, body["previous_response_id"])
+	assert.Contains(t, body, "stream_options")
 }
 
 func TestCodexOutbound_PreservesMinimalCompatTransforms(t *testing.T) {
@@ -231,13 +321,13 @@ func TestCodexOutbound_PreservesMinimalCompatTransforms(t *testing.T) {
 
 	body := decodeCodexRequestBody(t, hreq)
 
-	assert.Equal(t, false, body["store"])
+	assert.Equal(t, true, body["store"])
 	assert.Equal(t, true, body["stream"])
-	assert.NotContains(t, body, "max_output_tokens")
-	assert.Equal(t, true, body["parallel_tool_calls"])
+	assert.EqualValues(t, maxCompletionTokens, body["max_output_tokens"])
+	assert.Equal(t, false, body["parallel_tool_calls"])
 	assert.Equal(t, topP, body["top_p"])
 	assert.Equal(t, serviceTier, body["service_tier"])
-	assert.NotContains(t, body, "metadata")
+	assert.Equal(t, map[string]any{"source": "caller"}, body["metadata"])
 	assert.Equal(t, []any{"reasoning.encrypted_content"}, body["include"])
 
 	reasoning, ok := body["reasoning"].(map[string]any)
@@ -275,7 +365,42 @@ func TestCodexOutbound_AppliesReasoningDefaultsWhenMissing(t *testing.T) {
 	assert.Equal(t, true, body["parallel_tool_calls"])
 	assert.Equal(t, []any{"reasoning.encrypted_content"}, body["include"])
 	assert.Equal(t, "auto", reasoning["summary"])
+	assert.Equal(t, false, body["store"])
 	assert.NotContains(t, body, "metadata")
+}
+
+func TestCodexOutbound_CodexCallerDoesNotInjectOptionalCodexParametersWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+
+	hreq, err := outbound.TransformRequest(ctx, &llm.Request{
+		Model: "gpt-5-codex",
+		Messages: []llm.Message{{
+			Role:    "user",
+			Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+		}},
+		RawRequest: &httpclient.Request{
+			Headers: http.Header{
+				"Originator": []string{DefaultOriginator},
+				"User-Agent": []string{BuildDefaultCodexUserAgent()},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	body := decodeCodexRequestBody(t, hreq)
+	assert.Equal(t, true, body["stream"])
+	_, hasParallelToolCalls := body["parallel_tool_calls"]
+	_, hasInclude := body["include"]
+	_, hasReasoning := body["reasoning"]
+	_, hasStore := body["store"]
+	_, hasPromptCacheKey := body["prompt_cache_key"]
+	assert.False(t, hasParallelToolCalls)
+	assert.False(t, hasInclude)
+	assert.False(t, hasReasoning)
+	assert.False(t, hasStore)
+	assert.False(t, hasPromptCacheKey)
+	assert.Empty(t, hreq.Headers.Get(SessionHeader))
 }
 
 func newTestCodexOutbound(t *testing.T) *OutboundTransformer {

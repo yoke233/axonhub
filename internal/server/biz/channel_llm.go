@@ -557,6 +557,8 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 
 		return ch, nil
 	case channel.TypeCodex:
+		svc.warnOnNonSharedCodexSessionIDCache(ch)
+
 		// Check if using OAuth credentials first
 		if c.Credentials.IsOAuth() {
 			credsJSON := strings.TrimSpace(c.Credentials.APIKey)
@@ -593,6 +595,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 				TokenProvider:   p,
 				BaseURL:         c.BaseURL,
 				AccountIdentity: accountIdentity,
+				SessionIDCache:  svc.codexSessionIDCache,
 				InstallationID:  svc.ensureCodexInstallationID(c),
 			})
 			if err != nil {
@@ -601,7 +604,9 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 
 			ch.Outbound = transformer
 			svc.useUTLSForCodex(ch)
-			setupAutoRefresh(ch, p, oauth.AutoRefreshOptions{})
+			setupAutoRefresh(ch, p, oauth.AutoRefreshOptions{
+				RefreshBefore: codex.AutoRefreshBefore,
+			})
 
 			return ch, nil
 		}
@@ -614,6 +619,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel) (*Channel
 			TokenProvider:   tokens,
 			BaseURL:         c.BaseURL,
 			AccountIdentity: accountIdentity,
+			SessionIDCache:  svc.codexSessionIDCache,
 			InstallationID:  svc.ensureCodexInstallationID(c),
 		})
 		if err != nil {
@@ -831,6 +837,20 @@ func (svc *ChannelService) ensureCodexInstallationID(c *ent.Channel) string {
 	}
 
 	return newID
+}
+
+func (svc *ChannelService) warnOnNonSharedCodexSessionIDCache(ch *Channel) {
+	if svc.codexSessionIDCacheShared {
+		return
+	}
+
+	svc.codexSessionIDCacheWarnOnce.Do(func() {
+		log.Warn(context.Background(), "codex Session_id continuity is best-effort without shared cache",
+			log.String("cache_mode", svc.codexSessionIDCacheMode),
+			log.Int("channel_id", ch.ID),
+			log.String("channel", ch.Name),
+		)
+	})
 }
 
 func (svc *ChannelService) refreshOAuthToken(ctx context.Context, ch *ent.Channel, refreshed *oauth.OAuthCredentials) error {

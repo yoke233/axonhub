@@ -8,6 +8,8 @@ import (
 
 const (
 	SessionHeader         = "Session_id"
+	VersionHeader         = "Version"
+	TurnStateHeader       = "X-Codex-Turn-State"
 	TurnMetadataHeader    = "X-Codex-Turn-Metadata"
 	WindowIDHeader        = "X-Codex-Window-Id"
 	ClientRequestIDHeader = "X-Client-Request-Id"
@@ -23,11 +25,49 @@ type TurnMetadata struct {
 }
 
 var PassthroughHeaders = []string{
+	VersionHeader,
+	TurnStateHeader,
 	TurnMetadataHeader,
 	WindowIDHeader,
 	ClientRequestIDHeader,
 	BetaFeaturesHeader,
 	InstallationIDHeader,
+}
+
+func HasCodexCallerTraits(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+
+	originator := strings.ToLower(strings.TrimSpace(headers.Get("Originator")))
+	if originator == strings.ToLower(DefaultOriginator) || strings.Contains(originator, "codex") {
+		return true
+	}
+
+	userAgent := strings.ToLower(strings.TrimSpace(headers.Get("User-Agent")))
+	if strings.Contains(userAgent, strings.ToLower(DefaultOriginator)+"/") {
+		return true
+	}
+
+	for _, header := range []string{
+		TurnStateHeader,
+		TurnMetadataHeader,
+		WindowIDHeader,
+		ClientRequestIDHeader,
+		BetaFeaturesHeader,
+		InstallationIDHeader,
+	} {
+		if strings.TrimSpace(headers.Get(header)) != "" {
+			return true
+		}
+	}
+
+	version := strings.TrimSpace(headers.Get(VersionHeader))
+	if isCodexCLIVersion(version) && strings.TrimSpace(headers.Get(SessionHeader)) != "" {
+		return true
+	}
+
+	return false
 }
 
 func ExtractSessionIDFromTurnMetadata(raw string) string {

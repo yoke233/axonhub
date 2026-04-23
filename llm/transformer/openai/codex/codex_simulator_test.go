@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -94,6 +93,7 @@ func TestCodexOutbound_PassthroughModernCodexHeaders(t *testing.T) {
 	ctx := context.Background()
 	sim := newCodexSimulator(t)
 	req := newCodexChatCompletionRequest(t)
+	req.Header.Set("X-Codex-Turn-State", "turn-state-123")
 	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"turn-session","turn_id":"turn-123"}`)
 	req.Header.Set("X-Codex-Window-Id", "window-123")
 	req.Header.Set("X-Client-Request-Id", "request-123")
@@ -102,6 +102,7 @@ func TestCodexOutbound_PassthroughModernCodexHeaders(t *testing.T) {
 	finalReq, err := sim.Simulate(ctx, req)
 	require.NoError(t, err)
 
+	assert.Equal(t, "turn-state-123", finalReq.Header.Get("X-Codex-Turn-State"))
 	assert.Equal(t, `{"session_id":"turn-session","turn_id":"turn-123"}`, finalReq.Header.Get("X-Codex-Turn-Metadata"))
 	assert.Equal(t, "window-123", finalReq.Header.Get("X-Codex-Window-Id"))
 	assert.Equal(t, "request-123", finalReq.Header.Get("X-Client-Request-Id"))
@@ -141,10 +142,12 @@ func TestCodexOutbound_SessionIDPrecedence(t *testing.T) {
 		finalReq, err := sim.Simulate(ctx, req)
 		require.NoError(t, err)
 
-		assert.Equal(t, "context-session", finalReq.Header.Get("Session_id"))
+		sessionID := finalReq.Header.Get("Session_id")
+		assertCodexStyleSessionID(t, sessionID)
+		assert.NotEqual(t, "context-session", sessionID)
 	})
 
-	t.Run("invalid X-Codex-Turn-Metadata falls back to context session", func(t *testing.T) {
+	t.Run("invalid X-Codex-Turn-Metadata keeps codex passthrough mode", func(t *testing.T) {
 		ctx := shared.WithSessionID(context.Background(), "context-session")
 		sim := newCodexSimulator(t)
 		req := newCodexChatCompletionRequest(t)
@@ -153,7 +156,7 @@ func TestCodexOutbound_SessionIDPrecedence(t *testing.T) {
 		finalReq, err := sim.Simulate(ctx, req)
 		require.NoError(t, err)
 
-		assert.Equal(t, "context-session", finalReq.Header.Get("Session_id"))
+		assert.Empty(t, finalReq.Header.Get("Session_id"))
 	})
 
 	t.Run("no inbound no context generates uuid", func(t *testing.T) {
@@ -164,32 +167,9 @@ func TestCodexOutbound_SessionIDPrecedence(t *testing.T) {
 		require.NoError(t, err)
 
 		sessionID := finalReq.Header.Get("Session_id")
-		assert.NotEmpty(t, sessionID)
 		_, parseErr := uuid.Parse(sessionID)
 		assert.NoError(t, parseErr)
 	})
-}
-
-func TestCodexOutbound_DropsPreviousResponseID(t *testing.T) {
-	ctx := context.Background()
-	sim := newCodexSimulator(t)
-	req := newCodexChatCompletionRequest(t)
-
-	body := map[string]any{}
-	require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
-	body["previous_response_id"] = "resp_prev_123"
-	patched, err := json.Marshal(body)
-	require.NoError(t, err)
-	req.Body = io.NopCloser(bytes.NewReader(patched))
-	req.ContentLength = int64(len(patched))
-
-	finalReq, err := sim.Simulate(ctx, req)
-	require.NoError(t, err)
-
-	var payload map[string]any
-	require.NoError(t, json.NewDecoder(finalReq.Body).Decode(&payload))
-	_, exists := payload["previous_response_id"]
-	assert.False(t, exists)
 }
 
 func TestCodexOutbound_UsesContextSessionAsPromptCacheKey(t *testing.T) {
@@ -202,8 +182,9 @@ func TestCodexOutbound_UsesContextSessionAsPromptCacheKey(t *testing.T) {
 
 	var payload map[string]any
 	require.NoError(t, json.NewDecoder(finalReq.Body).Decode(&payload))
-	assert.Equal(t, "at-apc-session-cache-key", payload["prompt_cache_key"])
-	assert.Equal(t, "at-apc-session-cache-key", finalReq.Header.Get("Session_id"))
+	assertCodexStyleSessionID(t, finalReq.Header.Get("Session_id"))
+	assert.NotEqual(t, "at-apc-session-cache-key", finalReq.Header.Get("Session_id"))
+	assert.Equal(t, finalReq.Header.Get("Session_id"), payload["prompt_cache_key"])
 }
 
 func TestCodexOutbound_PrefersAnthropicPromptCacheKeyMetadata(t *testing.T) {
@@ -217,7 +198,6 @@ func TestCodexOutbound_PrefersAnthropicPromptCacheKeyMetadata(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-
 
 	request := &llm.Request{
 		Model:       "gpt-5.4",
@@ -234,7 +214,25 @@ func TestCodexOutbound_PrefersAnthropicPromptCacheKeyMetadata(t *testing.T) {
 	var payload map[string]any
 	require.NoError(t, json.NewDecoder(bytes.NewReader(finalReq.Body)).Decode(&payload))
 	assert.Equal(t, "anthropic-cache-v2-stable", payload["prompt_cache_key"])
-	assert.Equal(t, "anthropic-cache-v2-stable", finalReq.Headers.Get("Session_id"))
+	assertCodexStyleSessionID(t, finalReq.Headers.Get("Session_id"))
+	assert.NotEqual(t, "anthropic-cache-v2-stable", finalReq.Headers.Get("Session_id"))
+}
+
+func TestCodexOutbound_CodexCallerDoesNotSynthesizeConversationIdentity(t *testing.T) {
+	ctx := shared.WithSessionID(context.Background(), "trace-session-fallback")
+	sim := newCodexSimulator(t)
+	req := newCodexChatCompletionRequest(t)
+	req.Header.Set("Originator", DefaultOriginator)
+	req.Header.Set("User-Agent", BuildDefaultCodexUserAgent())
+
+	finalReq, err := sim.Simulate(ctx, req)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(finalReq.Body).Decode(&payload))
+	_, hasPromptCacheKey := payload["prompt_cache_key"]
+	assert.False(t, hasPromptCacheKey)
+	assert.Empty(t, finalReq.Header.Get("Session_id"))
 }
 
 func newCodexSimulator(t *testing.T) *simulator.Simulator {

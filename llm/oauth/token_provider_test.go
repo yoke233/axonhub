@@ -249,3 +249,76 @@ func TestTokenProviderRefreshValidation(t *testing.T) {
 	_, err = provider.refresh(context.Background(), &OAuthCredentials{RefreshToken: "refresh"})
 	require.EqualError(t, err, "http client is nil")
 }
+
+func TestTokenProviderRefreshNow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("forces refresh before expiry", func(t *testing.T) {
+		var calls atomic.Int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+
+			body, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+
+			form, err := url.ParseQuery(string(body))
+			require.NoError(t, err)
+			require.Equal(t, "refresh_token", form.Get("grant_type"))
+			require.Equal(t, "client-1", form.Get("client_id"))
+			require.Equal(t, "refresh-1", form.Get("refresh_token"))
+
+			resp := TokenResponse{
+				AccessToken:  "access-2",
+				RefreshToken: "refresh-2",
+				TokenType:    "Bearer",
+				Scope:        "scope-a scope-b",
+				ExpiresIn:    3600,
+			}
+			b, err := json.Marshal(resp)
+			require.NoError(t, err)
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(b)
+		}))
+		t.Cleanup(server.Close)
+
+		var refreshed atomic.Int32
+
+		provider := NewTokenProvider(TokenProviderParams{
+			HTTPClient: httpclient.NewHttpClientWithClient(server.Client()),
+			OAuthUrls:  OAuthUrls{TokenUrl: server.URL + "/token"},
+			Credentials: &OAuthCredentials{
+				ClientID:     "client-1",
+				AccessToken:  "access-1",
+				RefreshToken: "refresh-1",
+				ExpiresAt:    time.Now().Add(2 * time.Hour),
+			},
+			OnRefreshed: func(ctx context.Context, refreshedCreds *OAuthCredentials) error {
+				refreshed.Add(1)
+				require.Equal(t, "access-2", refreshedCreds.AccessToken)
+				return nil
+			},
+		})
+
+		creds, err := provider.RefreshNow(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, "access-2", creds.AccessToken)
+		require.Equal(t, "refresh-2", creds.RefreshToken)
+		require.Equal(t, int32(1), calls.Load())
+		require.Equal(t, int32(1), refreshed.Load())
+	})
+
+	t.Run("requires refresh token", func(t *testing.T) {
+		provider := NewTokenProvider(TokenProviderParams{
+			Credentials: &OAuthCredentials{
+				ClientID:    "client-1",
+				AccessToken: "access-1",
+				ExpiresAt:   time.Now().Add(time.Hour),
+			},
+		})
+
+		_, err := provider.RefreshNow(context.Background())
+		require.EqualError(t, err, "refresh_token is empty")
+	})
+}

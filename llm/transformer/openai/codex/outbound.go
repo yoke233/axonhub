@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/samber/lo"
 
@@ -35,6 +36,8 @@ type OutboundTransformer struct {
 
 	// reuse existing Responses outbound for payload building.
 	responsesOutbound *responses.OutboundTransformer
+	sessionIDCache    SessionIDCache
+	sessionIDScopeKey string
 }
 
 var (
@@ -46,6 +49,7 @@ type Params struct {
 	TokenProvider   oauth.TokenGetter
 	BaseURL         string
 	AccountIdentity string
+	SessionIDCache  SessionIDCache
 	// InstallationID is the channel-scoped fallback "device" UUID. Mirrors the value
 	// real codex_cli_rs reads from ~/.codex/installation_id and sends in both the
 	// 'x-codex-installation-id' header and body.client_metadata.
@@ -79,6 +83,8 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		tokens:            params.TokenProvider,
 		installationID:    params.InstallationID,
 		responsesOutbound: ro,
+		sessionIDCache:    resolveSessionIDCache(params.SessionIDCache),
+		sessionIDScopeKey: resolveSessionIDScopeKey(params.AccountIdentity),
 	}, nil
 }
 
@@ -88,6 +94,14 @@ func (t *OutboundTransformer) APIFormat() llm.APIFormat {
 
 func (t *OutboundTransformer) TransformError(ctx context.Context, rawErr *httpclient.Error) *llm.ResponseError {
 	return t.responsesOutbound.TransformError(ctx, rawErr)
+}
+
+func (t *OutboundTransformer) CanRetryUnauthorized(err error) bool {
+	return supportsUnauthorizedRetry(t.tokens, err)
+}
+
+func (t *OutboundTransformer) PrepareForUnauthorizedRetry(ctx context.Context) error {
+	return refreshUnauthorizedCredentials(ctx, t.tokens)
 }
 
 func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.Request) (*httpclient.Request, error) {
@@ -108,8 +122,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		rawUserAgent = llmReq.RawRequest.Headers.Get("User-Agent")
 		rawTurnMetadata = llmReq.RawRequest.Headers.Get(TurnMetadataHeader)
 	}
+	isCodexCaller := HasCodexCallerTraits(rawHeaders)
 
-	creds, err := t.tokens.Get(ctx)
+	creds, err := getRequestCredentials(ctx, t.tokens)
 	if err != nil {
 		return nil, err
 	}
@@ -120,50 +135,59 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	// Clone request so we do not mutate upstream pipeline state.
 	reqCopy := *llmReq
 
-	// Codex expects Responses API payload with some strict rules.
-	// Always enable stream except for compact requests and disable store.
-	//nolint: exhaustive // We only care about compact requests.
-	switch reqCopy.RequestType {
-	case llm.RequestTypeCompact:
-		reqCopy.Stream = lo.ToPtr(false)
-	default:
+	// For non-Codex callers we add Codex-compatible defaults. For requests that
+	// already look like real Codex clients, stay in passthrough-first mode.
+	if !isCodexCaller {
+		//nolint: exhaustive // We only care about compact requests.
+		switch reqCopy.RequestType {
+		case llm.RequestTypeCompact:
+			if reqCopy.Stream == nil {
+				reqCopy.Stream = lo.ToPtr(false)
+			}
+		default:
+			if reqCopy.Stream == nil {
+				reqCopy.Stream = lo.ToPtr(true)
+			}
+		}
+		if reqCopy.Store == nil {
+			reqCopy.Store = lo.ToPtr(false)
+		}
+		if reqCopy.ParallelToolCalls == nil {
+			reqCopy.ParallelToolCalls = lo.ToPtr(true)
+		}
+		if reqCopy.TransformerMetadata == nil {
+			reqCopy.TransformerMetadata = map[string]any{}
+		}
+		if _, ok := reqCopy.TransformerMetadata["include"]; !ok {
+			reqCopy.TransformerMetadata["include"] = []string{"reasoning.encrypted_content"}
+		}
+		if reqCopy.ReasoningSummary == nil || *reqCopy.ReasoningSummary == "" {
+			reqCopy.ReasoningSummary = lo.ToPtr("auto")
+		}
+	} else if reqCopy.Stream == nil && reqCopy.RequestType != llm.RequestTypeCompact {
+		// Stream transport is still required for non-compact Codex requests.
 		reqCopy.Stream = lo.ToPtr(true)
 	}
-	reqCopy.Store = lo.ToPtr(false)
 
-	// Codex recommends parallel tool calls.
-	reqCopy.ParallelToolCalls = lo.ToPtr(true)
-
-	// Ask for encrypted reasoning content so the downstream can surface reasoning blocks.
-	if reqCopy.TransformerMetadata == nil {
-		reqCopy.TransformerMetadata = map[string]any{}
-	}
-	if _, ok := reqCopy.TransformerMetadata["include"]; !ok {
-		reqCopy.TransformerMetadata["include"] = []string{"reasoning.encrypted_content"}
-	}
-	if reqCopy.ReasoningSummary == nil || *reqCopy.ReasoningSummary == "" {
-		// Enable reasoning summary for Codex CLI requests.
-		reqCopy.ReasoningSummary = lo.ToPtr("auto")
-	}
-
-	// Codex Responses rejects token limit fields, so strip them out.
-	reqCopy.MaxCompletionTokens = nil
-	reqCopy.MaxTokens = nil
-
-	reqCopy.Metadata = nil
-	reqCopy.PreviousResponseID = nil
-
-	// Resolve a single conversation key (passthrough-first) and apply it consistently to
-	// both the body's prompt_cache_key and the outgoing Session_id header. Real codex_cli_rs
-	// keeps these equal (codex-rs/core/src/client.rs:853 sets prompt_cache_key from
-	// conversation_id, and codex-api headers.rs:8 sets session_id from the same value).
-	conversationKey := resolveConversationKey(ctx, rawSessionID, rawTurnMetadata, reqCopy.TransformerMetadata, reqCopy.PromptCacheKey)
-	reqCopy.PromptCacheKey = lo.ToPtr(conversationKey)
+	// Preserve caller-supplied conversation fields; only synthesize fallback
+	// values when the inbound request does not already look like Codex.
+	sessionID, promptCacheKey := resolveConversationFields(
+		ctx,
+		rawSessionID,
+		rawTurnMetadata,
+		reqCopy.TransformerMetadata,
+		reqCopy.PromptCacheKey,
+		t.sessionIDCache,
+		t.sessionIDScopeKey,
+		!isCodexCaller,
+	)
+	reqCopy.PromptCacheKey = promptCacheKey
 
 	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
 	if err != nil {
 		return nil, err
 	}
+	hreq.Body = sanitizeCodexRequestBody(hreq.Body, promptCacheKey != nil)
 
 	// Overwrite auth.
 	hreq.Auth = &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken}
@@ -173,6 +197,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	} else {
 		hreq.Headers.Set("Accept", "text/event-stream")
 	}
+	hreq.Headers.Set("Connection", "Keep-Alive")
 	hreq.Headers.Del("User-Agent")
 	if rawOriginator != "" {
 		hreq.Headers.Set("Originator", rawOriginator)
@@ -194,8 +219,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
-	// Session_id header MUST equal body.prompt_cache_key — this is the real CLI invariant.
-	hreq.Headers.Set(SessionHeader, conversationKey)
+	if sessionID != "" {
+		hreq.Headers.Set(SessionHeader, sessionID)
+	}
 
 	if accountID != "" {
 		hreq.Headers.Set("Chatgpt-Account-Id", accountID)
@@ -210,6 +236,23 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	return hreq, nil
+}
+
+func resolveSessionIDCache(cache SessionIDCache) SessionIDCache {
+	if cache != nil {
+		return cache
+	}
+
+	return newMemorySessionIDCache()
+}
+
+func resolveSessionIDScopeKey(accountIdentity string) string {
+	accountIdentity = strings.TrimSpace(accountIdentity)
+	if accountIdentity == "" {
+		return "default"
+	}
+
+	return accountIdentity
 }
 func (t *OutboundTransformer) TransformResponse(ctx context.Context, httpResp *httpclient.Response) (*llm.Response, error) {
 	// Codex upstream returns Responses API response.
