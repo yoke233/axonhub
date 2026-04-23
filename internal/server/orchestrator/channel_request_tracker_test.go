@@ -258,6 +258,16 @@ func TestChannelRequestTracker_GetCooldownUntil_Expired(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestChannelRequestTracker_ClearCooldown(t *testing.T) {
+	tracker := NewChannelRequestTracker()
+	tracker.SetCooldown(1, time.Now().Add(30*time.Second))
+
+	tracker.ClearCooldown(1)
+
+	_, ok := tracker.GetCooldownUntil(1)
+	assert.False(t, ok)
+}
+
 func TestChannelRequestTracker_ClearExpiredCooldown_DoesNotDeleteNewerValue(t *testing.T) {
 	tracker := NewChannelRequestTracker()
 

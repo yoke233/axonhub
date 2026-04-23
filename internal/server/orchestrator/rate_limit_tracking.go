@@ -43,6 +43,25 @@ func (m *rateLimitTracking) Name() string {
 	return "track-rate-limit"
 }
 
+func (m *rateLimitTracking) clearRecoveredUnauthorizedCooldown(ctx context.Context) {
+	if m.outbound == nil || !m.outbound.consumeUnauthorizedRecoverySuccess() {
+		return
+	}
+
+	channel := m.outbound.GetCurrentChannel()
+	if channel == nil {
+		return
+	}
+
+	if until, ok := m.tracker.GetCooldownUntil(channel.ID); ok && time.Until(until) > time.Hour {
+		m.tracker.ClearCooldown(channel.ID)
+		log.Info(ctx, "cleared codex auth cooldown after successful unauthorized recovery",
+			log.Int("channel_id", channel.ID),
+			log.String("channel_name", channel.Name),
+		)
+	}
+}
+
 func (m *rateLimitTracking) OnOutboundRawRequest(ctx context.Context, request *httpclient.Request) (*httpclient.Request, error) {
 	channel := m.outbound.GetCurrentChannel()
 	if channel == nil {
@@ -63,6 +82,8 @@ func (m *rateLimitTracking) OnOutboundRawRequest(ctx context.Context, request *h
 }
 
 func (m *rateLimitTracking) OnOutboundLlmResponse(ctx context.Context, response *llm.Response) (*llm.Response, error) {
+	m.clearRecoveredUnauthorizedCooldown(ctx)
+
 	channel := m.outbound.GetCurrentChannel()
 	if channel == nil || response == nil || response.Usage == nil {
 		return response, nil
@@ -165,6 +186,19 @@ func (s *rateLimitTrackingStream) Current() *llm.Response {
 	event := s.stream.Current()
 	if event == nil {
 		return event
+	}
+
+	if s.outbound != nil {
+		channel := s.outbound.GetCurrentChannel()
+		if channel != nil && s.outbound.consumeUnauthorizedRecoverySuccess() {
+			if until, ok := s.tracker.GetCooldownUntil(channel.ID); ok && time.Until(until) > time.Hour {
+				s.tracker.ClearCooldown(channel.ID)
+				log.Info(s.ctx, "cleared codex auth cooldown after successful unauthorized recovery",
+					log.Int("channel_id", channel.ID),
+					log.String("channel_name", channel.Name),
+				)
+			}
+		}
 	}
 
 	// Track tokens if usage information is present (typically in the last chunk)

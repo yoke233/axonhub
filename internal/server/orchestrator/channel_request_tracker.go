@@ -9,10 +9,10 @@ import (
 // within a fixed 1-minute sliding window for rate limiting.
 // It also manages cooldown periods for channels that received 429 errors.
 type ChannelRequestTracker struct {
-	mu           sync.RWMutex
-	counters     map[int]*rateLimitWindow // channelID -> per-minute window
-	dailyTokens  map[int]*dailyTokenWindow // channelID -> per-UTC-day token counter
-	cooldowns    map[int]time.Time         // channelID -> cooldown expiration time
+	mu          sync.RWMutex
+	counters    map[int]*rateLimitWindow  // channelID -> per-minute window
+	dailyTokens map[int]*dailyTokenWindow // channelID -> per-UTC-day token counter
+	cooldowns   map[int]time.Time         // channelID -> cooldown expiration time
 }
 
 type rateLimitWindow struct {
@@ -170,6 +170,14 @@ func (t *ChannelRequestTracker) SetCooldown(channelID int, until time.Time) {
 	}
 
 	t.cooldowns[channelID] = until
+}
+
+// ClearCooldown removes any cooldown entry for a channel.
+func (t *ChannelRequestTracker) ClearCooldown(channelID int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.cooldowns, channelID)
 }
 
 // IsCoolingDown checks if a channel is currently in a cooldown period.

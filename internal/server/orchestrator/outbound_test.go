@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -68,6 +69,22 @@ func (m *mockTransformer) APIFormat() llm.APIFormat {
 	}
 
 	return llm.APIFormatOpenAIChatCompletion
+}
+
+type mockUnauthorizedRetryableTransformer struct {
+	mockTransformer
+	canRetryUnauthorized bool
+	prepareCalls         int
+	prepareErr           error
+}
+
+func (m *mockUnauthorizedRetryableTransformer) CanRetryUnauthorized(err error) bool {
+	return m.canRetryUnauthorized && ExtractStatusCodeFromError(err) == http.StatusUnauthorized
+}
+
+func (m *mockUnauthorizedRetryableTransformer) PrepareForUnauthorizedRetry(ctx context.Context) error {
+	m.prepareCalls++
+	return m.prepareErr
 }
 
 func TestPersistentOutboundTransformer_TransformRequest_OriginalModelRestoration(t *testing.T) {
@@ -224,6 +241,80 @@ func TestPersistentOutboundTransformer_PrepareForRetry(t *testing.T) {
 		require.Equal(t, 1, processor.state.CurrentModelIndex)
 		require.Nil(t, processor.state.RequestExec)
 	})
+
+	t.Run("unauthorized refresh keeps current model and prepares wrapped outbound", func(t *testing.T) {
+		authRetryable := &mockUnauthorizedRetryableTransformer{
+			canRetryUnauthorized: true,
+		}
+		channel := &biz.Channel{
+			Channel: &ent.Channel{
+				ID:   9,
+				Name: "codex-like-channel",
+			},
+			Outbound: authRetryable,
+		}
+
+		processor := &PersistentOutboundTransformer{
+			wrapped: authRetryable,
+			state: &PersistenceState{
+				CurrentCandidate: &ChannelModelsCandidate{
+					Channel: channel,
+					Models: []biz.ChannelModelEntry{
+						{RequestModel: "gpt-5-codex", ActualModel: "gpt-5-codex"},
+						{RequestModel: "gpt-4.1", ActualModel: "gpt-4.1"},
+					},
+				},
+				CurrentModelIndex: 0,
+				RequestExec:       &ent.RequestExecution{ID: 1},
+			},
+			pendingRetryAction: pendingRetryUnauthorized,
+		}
+
+		err := processor.PrepareForRetry(ctx)
+
+		require.NoError(t, err)
+		require.Equal(t, 1, authRetryable.prepareCalls)
+		require.Zero(t, processor.state.CurrentModelIndex)
+		require.Nil(t, processor.state.RequestExec)
+		require.True(t, processor.clearAuthCooldownOnSuccess)
+	})
+
+	t.Run("unauthorized refresh failure stops same-channel preparation", func(t *testing.T) {
+		authRetryable := &mockUnauthorizedRetryableTransformer{
+			canRetryUnauthorized: true,
+			prepareErr:           errors.New("refresh failed"),
+		}
+		channel := &biz.Channel{
+			Channel: &ent.Channel{
+				ID:   10,
+				Name: "codex-like-channel",
+			},
+			Outbound: authRetryable,
+		}
+
+		processor := &PersistentOutboundTransformer{
+			wrapped: authRetryable,
+			state: &PersistenceState{
+				CurrentCandidate: &ChannelModelsCandidate{
+					Channel: channel,
+					Models: []biz.ChannelModelEntry{
+						{RequestModel: "gpt-5-codex", ActualModel: "gpt-5-codex"},
+					},
+				},
+				CurrentModelIndex: 0,
+				RequestExec:       &ent.RequestExecution{ID: 1},
+			},
+			pendingRetryAction: pendingRetryUnauthorized,
+		}
+
+		err := processor.PrepareForRetry(ctx)
+
+		require.EqualError(t, err, "refresh failed")
+		require.Equal(t, 1, authRetryable.prepareCalls)
+		require.Zero(t, processor.state.CurrentModelIndex)
+		require.Nil(t, processor.state.RequestExec)
+		require.False(t, processor.clearAuthCooldownOnSuccess)
+	})
 }
 
 func TestPersistentOutboundTransformer_CanRetry(t *testing.T) {
@@ -308,6 +399,38 @@ func TestPersistentOutboundTransformer_CanRetry(t *testing.T) {
 		}
 
 		require.True(t, outbound.CanRetry(retryableErr))
+	})
+
+	t.Run("401 prefers unauthorized recovery over model switch", func(t *testing.T) {
+		authRetryable := &mockUnauthorizedRetryableTransformer{
+			canRetryUnauthorized: true,
+		}
+		channel := &biz.Channel{
+			Channel: &ent.Channel{
+				ID:   2,
+				Name: "codex-like-channel",
+			},
+			Outbound: authRetryable,
+		}
+
+		outbound := &PersistentOutboundTransformer{
+			wrapped: authRetryable,
+			state: &PersistenceState{
+				CurrentCandidate: &ChannelModelsCandidate{
+					Channel: channel,
+					Models: []biz.ChannelModelEntry{
+						{RequestModel: "gpt-5-codex", ActualModel: "gpt-5-codex"},
+						{RequestModel: "gpt-4.1", ActualModel: "gpt-4.1"},
+					},
+				},
+				CurrentModelIndex: 0,
+			},
+		}
+
+		httpErr := &httpclient.Error{StatusCode: http.StatusUnauthorized}
+
+		require.True(t, outbound.CanRetry(httpErr))
+		require.Equal(t, pendingRetryUnauthorized, outbound.pendingRetryAction)
 	})
 }
 

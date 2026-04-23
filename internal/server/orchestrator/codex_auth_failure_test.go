@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/server/biz"
+	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/streams"
 )
 
 func newCodexChannel(id int) *biz.Channel {
@@ -40,10 +43,46 @@ func newOpenAIChannel(id int) *biz.Channel {
 // rateLimitTracking middleware only consults outbound.GetCurrentChannel().
 func newStubOutbound(ch *biz.Channel) *PersistentOutboundTransformer {
 	return &PersistentOutboundTransformer{
+		wrapped: ch.Outbound,
 		state: &PersistenceState{
 			CurrentCandidate: &ChannelModelsCandidate{Channel: ch},
 		},
 	}
+}
+
+type stubUnauthorizedRetryableTransformer struct{}
+
+func (s *stubUnauthorizedRetryableTransformer) TransformRequest(ctx context.Context, req *llm.Request) (*httpclient.Request, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *stubUnauthorizedRetryableTransformer) TransformResponse(ctx context.Context, resp *httpclient.Response) (*llm.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *stubUnauthorizedRetryableTransformer) TransformStream(ctx context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
+	return nil, errors.New("not implemented")
+}
+
+func (s *stubUnauthorizedRetryableTransformer) TransformError(ctx context.Context, err *httpclient.Error) *llm.ResponseError {
+	return nil
+}
+
+func (s *stubUnauthorizedRetryableTransformer) AggregateStreamChunks(ctx context.Context, chunks []*httpclient.StreamEvent) ([]byte, llm.ResponseMeta, error) {
+	return nil, llm.ResponseMeta{}, errors.New("not implemented")
+}
+
+func (s *stubUnauthorizedRetryableTransformer) APIFormat() llm.APIFormat {
+	return llm.APIFormatOpenAIResponse
+}
+
+func (s *stubUnauthorizedRetryableTransformer) CanRetryUnauthorized(err error) bool {
+	status, ok := httpStatusFromError(err)
+	return ok && status == http.StatusUnauthorized
+}
+
+func (s *stubUnauthorizedRetryableTransformer) PrepareForUnauthorizedRetry(ctx context.Context) error {
+	return nil
 }
 
 func TestCodexAutoSuspend_On401SetsLongCooldown(t *testing.T) {
@@ -125,4 +164,22 @@ func TestCodexAutoSuspend_StrategySkipsCooldownChannel(t *testing.T) {
 	score := strategy.Score(context.Background(), ch)
 	assert.Equal(t, float64(rateLimitExhaustedScore), score,
 		"after auto-suspend the load balancer must rank the channel last")
+}
+
+func TestCodexAutoSuspend_RecoverySuccessClearsAuthCooldown(t *testing.T) {
+	tracker := NewChannelRequestTracker()
+	ch := newCodexChannel(6)
+	ch.Outbound = &stubUnauthorizedRetryableTransformer{}
+
+	outbound := newStubOutbound(ch)
+	outbound.clearAuthCooldownOnSuccess = true
+	tracker.SetCooldown(ch.ID, time.Now().Add(codexAuthFailureCooldown))
+
+	rl := withRateLimitTracking(outbound, tracker).(*rateLimitTracking)
+
+	_, err := rl.OnOutboundLlmResponse(context.Background(), &llm.Response{})
+	require.NoError(t, err)
+
+	_, cooling := tracker.GetCooldownUntil(ch.ID)
+	assert.False(t, cooling, "successful unauthorized recovery should clear the long auth cooldown")
 }

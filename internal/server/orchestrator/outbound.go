@@ -305,10 +305,25 @@ func isCompletedAggregatedOutboundResponse(meta llm.ResponseMeta) bool {
 
 var errSkipCandidateByCircuitBreaker = errors.New("skip candidate by circuit breaker")
 
+type unauthorizedRetryable interface {
+	CanRetryUnauthorized(err error) bool
+	PrepareForUnauthorizedRetry(ctx context.Context) error
+}
+
+type pendingRetryAction uint8
+
+const (
+	pendingRetryNone pendingRetryAction = iota
+	pendingRetryUnauthorized
+)
+
 // PersistentOutboundTransformer wraps an outbound transformer with shared persistence state.
 type PersistentOutboundTransformer struct {
 	wrapped transformer.Outbound
 	state   *PersistenceState
+
+	pendingRetryAction         pendingRetryAction
+	clearAuthCooldownOnSuccess bool
 }
 
 // APIFormat returns the API format of the transformer.
@@ -446,6 +461,23 @@ func (p *PersistentOutboundTransformer) GetRequestedModel() string {
 	return p.state.OriginalModel
 }
 
+func (p *PersistentOutboundTransformer) currentRetryTransformer() transformer.Outbound {
+	if p.state != nil && p.state.CurrentCandidate != nil && p.state.CurrentCandidate.Channel != nil && p.state.CurrentCandidate.Channel.Outbound != nil {
+		return p.state.CurrentCandidate.Channel.Outbound
+	}
+
+	return p.wrapped
+}
+
+func (p *PersistentOutboundTransformer) consumeUnauthorizedRecoverySuccess() bool {
+	if !p.clearAuthCooldownOnSuccess {
+		return false
+	}
+
+	p.clearAuthCooldownOnSuccess = false
+	return true
+}
+
 // HasMoreChannels returns true if there are more candidates available for retry.
 // It implements the pipeline.Retryable interface.
 func (p *PersistentOutboundTransformer) HasMoreChannels() bool {
@@ -464,6 +496,8 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 
 	// Reset request execution for the new candidate
 	p.state.RequestExec = nil
+	p.pendingRetryAction = pendingRetryNone
+	p.clearAuthCooldownOnSuccess = false
 
 	candidate := p.state.ChannelModelsCandidates[p.state.CurrentCandidateIndex]
 	p.state.CurrentCandidate = candidate
@@ -489,8 +523,16 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 		return false
 	}
 
+	p.pendingRetryAction = pendingRetryNone
+	p.clearAuthCooldownOnSuccess = false
+
 	if errors.Is(err, errSkipCandidateByCircuitBreaker) {
 		return false
+	}
+
+	if retryable, ok := p.currentRetryTransformer().(unauthorizedRetryable); ok && retryable.CanRetryUnauthorized(err) {
+		p.pendingRetryAction = pendingRetryUnauthorized
+		return true
 	}
 
 	// Empty response detection: allow same-channel retry so the pipeline can
@@ -540,6 +582,34 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 
 	// Reset request execution for the same channel.
 	p.state.RequestExec = nil
+
+	if p.pendingRetryAction == pendingRetryUnauthorized {
+		p.pendingRetryAction = pendingRetryNone
+
+		retryable, ok := p.currentRetryTransformer().(unauthorizedRetryable)
+		if !ok {
+			return errors.New("unauthorized retry requested but outbound does not support it")
+		}
+
+		if err := retryable.PrepareForUnauthorizedRetry(ctx); err != nil {
+			return err
+		}
+
+		p.clearAuthCooldownOnSuccess = true
+		p.wrapped = candidate.Channel.Outbound
+
+		if log.DebugEnabled(ctx) {
+			model := candidate.Models[p.state.CurrentModelIndex].ActualModel
+			log.Debug(ctx, "prepared same channel retry after unauthorized refresh",
+				log.Any("channel", candidate.Channel.Name),
+				log.Any("model", model),
+				log.Int("current_candidate_index", p.state.CurrentCandidateIndex),
+				log.Int("current_entry_index", p.state.CurrentModelIndex),
+			)
+		}
+
+		return nil
+	}
 
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {
