@@ -183,6 +183,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	)
 	reqCopy.PromptCacheKey = promptCacheKey
 
+	reqCopy.TransformOptions.ArrayInputs = lo.ToPtr(true)
 	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
 	if err != nil {
 		return nil, err
