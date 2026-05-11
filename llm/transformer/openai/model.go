@@ -365,7 +365,7 @@ type Function struct {
 
 // FunctionCall represents a function call.
 type FunctionCall struct {
-	Name      string `json:"name"`
+	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments"`
 }
 
