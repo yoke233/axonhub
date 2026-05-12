@@ -379,12 +379,12 @@ func TestMergeInboundRequest(t *testing.T) {
 		}
 		src := &Request{
 			Headers: http.Header{
-				"Cf-Ray":          []string{"abc123"},
+				"Cf-Ray":           []string{"abc123"},
 				"Cf-Connecting-Ip": []string{"1.2.3.4"},
-				"Cf-Ipcountry":    []string{"US"},
-				"Cf-Visitor":      []string{`{"scheme":"https"}`},
-				"Cdn-Loop":        []string{"cloudflare; loops=1"},
-				"User-Agent":      []string{"Test/1.0"},
+				"Cf-Ipcountry":     []string{"US"},
+				"Cf-Visitor":       []string{`{"scheme":"https"}`},
+				"Cdn-Loop":         []string{"cloudflare; loops=1"},
+				"User-Agent":       []string{"Test/1.0"},
 			},
 			Query: url.Values{},
 		}
@@ -396,6 +396,40 @@ func TestMergeInboundRequest(t *testing.T) {
 		require.Empty(t, got.Headers.Get("Cf-Visitor"))
 		require.Empty(t, got.Headers.Get("Cdn-Loop"))
 		require.Equal(t, "Test/1.0", got.Headers.Get("User-Agent"))
+	})
+
+	t.Run("should block proxy and client ip disclosure headers", func(t *testing.T) {
+		dest := &Request{
+			Headers: http.Header{"Content-Type": []string{"application/json"}},
+			Query:   url.Values{},
+		}
+		src := &Request{
+			Headers: http.Header{
+				"Forwarded":                  []string{"for=1.2.3.4;proto=https"},
+				"Remote-Addr":                []string{"1.2.3.4"},
+				"Remote-Host":                []string{"1.2.3.4"},
+				"True-Client-Ip":             []string{"1.2.3.4"},
+				"Via":                        []string{"1.1 proxy"},
+				"Proxy-Connection":           []string{"keep-alive"},
+				"X-Client-Ip":                []string{"1.2.3.4"},
+				"X-Cluster-Client-Ip":        []string{"1.2.3.4"},
+				"X-Envoy-External-Address":   []string{"1.2.3.4"},
+				"X-Original-Forwarded-For":   []string{"1.2.3.4"},
+				"X-Forwarded-Ssl":            []string{"on"},
+				"X-Provider-Feature-Request": []string{"keep-me"},
+			},
+			Query: url.Values{},
+		}
+
+		got := MergeInboundRequest(dest, src)
+
+		for header := range src.Headers {
+			if header == "X-Provider-Feature-Request" {
+				continue
+			}
+			require.Empty(t, got.Headers.Get(header), "%s should not be merged", header)
+		}
+		require.Equal(t, "keep-me", got.Headers.Get("X-Provider-Feature-Request"))
 	})
 
 	t.Run("should return dest if src is nil", func(t *testing.T) {
