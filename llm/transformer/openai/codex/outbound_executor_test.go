@@ -242,7 +242,7 @@ func TestCodexOutbound_UsesEnsureFreshWhenAvailable(t *testing.T) {
 	assert.Equal(t, RequestRefreshBefore, getter.lastRefreshBefore)
 }
 
-func TestCodexOutbound_PreservesCallerBodyFieldsAndSetsCodexHeaders(t *testing.T) {
+func TestCodexOutbound_StripsBodyFieldsCodexBackendRejects(t *testing.T) {
 	ctx := context.Background()
 	outbound := newTestCodexOutbound(t)
 	retention := "24h"
@@ -277,10 +277,10 @@ func TestCodexOutbound_PreservesCallerBodyFieldsAndSetsCodexHeaders(t *testing.T
 	assert.Equal(t, "9.9.9", hreq.Headers.Get(VersionHeader))
 	assert.Equal(t, "turn-state-123", hreq.Headers.Get(TurnStateHeader))
 	assert.Equal(t, "Keep-Alive", hreq.Headers.Get("Connection"))
-	assert.Equal(t, retention, body["prompt_cache_retention"])
-	assert.Equal(t, safetyIdentifier, body["safety_identifier"])
-	assert.Equal(t, previousResponseID, body["previous_response_id"])
-	assert.Contains(t, body, "stream_options")
+	assert.NotContains(t, body, "prompt_cache_retention")
+	assert.NotContains(t, body, "safety_identifier")
+	assert.NotContains(t, body, "previous_response_id")
+	assert.NotContains(t, body, "stream_options")
 }
 
 func TestCodexOutbound_PreservesMinimalCompatTransforms(t *testing.T) {
@@ -323,12 +323,15 @@ func TestCodexOutbound_PreservesMinimalCompatTransforms(t *testing.T) {
 
 	assert.Equal(t, true, body["store"])
 	assert.Equal(t, true, body["stream"])
-	assert.EqualValues(t, maxCompletionTokens, body["max_output_tokens"])
 	assert.Equal(t, false, body["parallel_tool_calls"])
-	assert.Equal(t, topP, body["top_p"])
 	assert.Equal(t, serviceTier, body["service_tier"])
-	assert.Equal(t, map[string]any{"source": "caller"}, body["metadata"])
 	assert.Equal(t, []any{"reasoning.encrypted_content"}, body["include"])
+	// The ChatGPT Codex backend rejects these fields, so they must be stripped
+	// even when callers (e.g. the channel-test harness) supply them.
+	assert.NotContains(t, body, "max_output_tokens")
+	assert.NotContains(t, body, "max_tokens")
+	assert.NotContains(t, body, "top_p")
+	assert.NotContains(t, body, "metadata")
 
 	reasoning, ok := body["reasoning"].(map[string]any)
 	require.True(t, ok)
@@ -367,6 +370,54 @@ func TestCodexOutbound_AppliesReasoningDefaultsWhenMissing(t *testing.T) {
 	assert.Equal(t, "auto", reasoning["summary"])
 	assert.Equal(t, false, body["store"])
 	assert.NotContains(t, body, "metadata")
+}
+
+// Regression: the channel-test harness (internal/server/orchestrator/tester.go)
+// always sets MaxCompletionTokens=256. Without sanitization that surfaces as
+// "max_output_tokens" in the Codex payload and the ChatGPT Codex backend
+// answers 400 "Unsupported parameter: max_output_tokens". Make sure every
+// known-unsupported field gets stripped before the request leaves.
+func TestCodexOutbound_StripsAllCodexUnsupportedFields(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+
+	temperature := 0.7
+	topP := 0.9
+	maxCompletionTokens := int64(256)
+	user := "user-abc"
+	prevID := "resp_prev"
+	truncation := "auto"
+	safety := "user-safety"
+	retention := "24h"
+
+	hreq, err := outbound.TransformRequest(ctx, &llm.Request{
+		Model: "gpt-5-codex",
+		Messages: []llm.Message{{
+			Role:    "user",
+			Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+		}},
+		Stream:              lo.ToPtr(true),
+		Temperature:         &temperature,
+		TopP:                &topP,
+		MaxCompletionTokens: &maxCompletionTokens,
+		User:                &user,
+		PreviousResponseID:  &prevID,
+		SafetyIdentifier:    &safety,
+		StreamOptions:       &llm.StreamOptions{IncludeUsage: true},
+		Metadata:            map[string]string{"source": "channel-test"},
+		TransformerMetadata: map[string]any{
+			"truncation":             &truncation,
+			"prompt_cache_retention": &retention,
+			"max_tool_calls":         int64(8),
+		},
+	})
+	require.NoError(t, err)
+
+	body := decodeCodexRequestBody(t, hreq)
+
+	for _, field := range codexUnsupportedRequestFields {
+		assert.NotContainsf(t, body, field, "field %q must be stripped before forwarding to Codex backend", field)
+	}
 }
 
 func TestCodexOutbound_ForcesArrayInputsForSingleMessage(t *testing.T) {
