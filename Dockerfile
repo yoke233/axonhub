@@ -4,7 +4,7 @@ WORKDIR /build
 RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile --ignore-scripts
 
 COPY ./frontend .
 ENV NODE_OPTIONS="--max-old-space-size=4096"
