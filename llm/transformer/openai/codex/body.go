@@ -56,6 +56,10 @@ var codexUnsupportedRequestFields = []string{
 
 func stripCodexUnsupportedFields(body []byte) []byte {
 	for _, field := range codexUnsupportedRequestFields {
+		if !gjson.GetBytes(body, field).Exists() {
+			continue
+		}
+
 		body, _ = sjson.DeleteBytes(body, field)
 	}
 
