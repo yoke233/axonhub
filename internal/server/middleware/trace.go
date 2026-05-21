@@ -22,6 +22,39 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
+// cachedBodyKey is the gin.Context key used to memoize the request body so the
+// trace middleware can inspect it multiple times without re-reading and
+// re-allocating via io.ReadAll on each call.
+const cachedBodyKey = "axonhub.middleware.cached_body"
+
+// peekRequestBody returns the request body bytes, caching them on the context so
+// subsequent calls within the same request avoid re-reading the body. The body
+// reader is reset to a fresh bytes.Reader on every call (even on cache hits) so
+// downstream handlers always see the full payload, matching the original
+// "ReadAll + NopCloser" pattern. The returned slice MUST be treated as read-only.
+func peekRequestBody(c *gin.Context) ([]byte, error) {
+	if v, ok := c.Get(cachedBodyKey); ok {
+		if b, ok := v.([]byte); ok {
+			c.Request.Body = io.NopCloser(bytes.NewReader(b))
+			return b, nil
+		}
+	}
+
+	if c.Request == nil || c.Request.Body == nil {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Set(cachedBodyKey, body)
+
+	return body, nil
+}
+
 // traceHeaderName returns the name of the header used for trace IDs.
 func traceHeaderName(config tracing.Config) string {
 	if config.TraceHeader != "" {
@@ -55,12 +88,11 @@ func tryGetTraceIDFromBody(c *gin.Context, config tracing.Config) (string, error
 		return "", nil
 	}
 
-	body, err := io.ReadAll(c.Request.Body)
+	body, err := peekRequestBody(c)
 	if err != nil {
 		return "", fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 	if len(body) == 0 {
 		return "", nil
 	}
@@ -173,12 +205,11 @@ func tryExtractTraceIDFromClaudeCodeRequest(c *gin.Context, config tracing.Confi
 		return "", nil
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := peekRequestBody(c)
 	if err != nil {
 		return "", fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	if len(bodyBytes) == 0 {
 		return "", nil
 	}
@@ -210,12 +241,11 @@ func tryExtractAnthropicPromptCacheTraceID(c *gin.Context) (string, error) {
 		return "", nil
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := peekRequestBody(c)
 	if err != nil {
 		return "", fmt.Errorf("failed to read request body: %w", err)
 	}
 
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	if len(bodyBytes) == 0 {
 		return "", nil
 	}

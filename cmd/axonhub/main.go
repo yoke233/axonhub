@@ -57,6 +57,8 @@ func (l *logger) LogEvent(event fxevent.Event) {
 }
 
 func startServer() {
+	configureMemoryLimit()
+
 	server.Run(
 		fx.StartTimeout(60*time.Second),
 		fx.StopTimeout(30*time.Second),

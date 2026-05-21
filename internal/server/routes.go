@@ -1,6 +1,9 @@
 package server
 
 import (
+	"net/http"
+	"net/http/pprof"
+
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
@@ -126,6 +129,32 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 			middleware.WithTimeout(server.Config.RequestTimeout),
 			handlers.RequestPreview.PreviewRequest,
 		)
+
+		// pprof endpoints. JWT-protected via the parent adminGroup; long-running
+		// profiles (cpu profile / trace) need a longer timeout, so use the LLM
+		// request timeout which is normally several minutes.
+		pprofGroup := adminGroup.Group("/debug/pprof", middleware.WithTimeout(server.Config.LLMRequestTimeout))
+		{
+			pprofGroup.GET("/", gin.WrapF(pprof.Index))
+			pprofGroup.GET("/cmdline", gin.WrapF(pprof.Cmdline))
+			pprofGroup.GET("/profile", gin.WrapF(pprof.Profile))
+			pprofGroup.GET("/symbol", gin.WrapF(pprof.Symbol))
+			pprofGroup.POST("/symbol", gin.WrapF(pprof.Symbol))
+			pprofGroup.GET("/trace", gin.WrapF(pprof.Trace))
+			// pprof.Handler covers per-profile endpoints registered with runtime/pprof.
+			for _, name := range []string{"allocs", "block", "goroutine", "heap", "mutex", "threadcreate"} {
+				h := pprof.Handler(name)
+				pprofGroup.GET("/"+name, func(c *gin.Context) { h.ServeHTTP(c.Writer, c.Request) })
+			}
+
+			// pprof.Index expects URL paths under /debug/pprof/*; gin's static-prefix
+			// nature means the index link list works because all sub-paths exist above.
+			// However the bare "/debug/pprof" (no trailing slash) needs an explicit
+			// redirect so links from external tools (go tool pprof) still resolve.
+			adminGroup.GET("/debug/pprof", func(c *gin.Context) {
+				c.Redirect(http.StatusMovedPermanently, "/admin/debug/pprof/")
+			})
+		}
 	}
 
 	openAPIGroup := server.Group("/openapi", middleware.WithOpenAPIAuth(services.AuthService), middleware.WithTimeout(server.Config.RequestTimeout))

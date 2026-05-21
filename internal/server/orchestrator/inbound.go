@@ -227,6 +227,12 @@ func (ts *InboundPersistentStream) _persistResponse(ctx context.Context, respons
 	if err := ts.requestService.SaveRequestChunks(ctx, ts.request.ID, ts.responseChunks); err != nil {
 		log.Warn(ctx, "Failed to save request chunks", log.Cause(err))
 	}
+
+	// Drop the chunk slice so the underlying StreamEvent backing array can be
+	// reclaimed by GC immediately. Without this, the slice (which for long
+	// streams can hold hundreds of KB per request) lingers until the stream
+	// wrapper itself is collected — which is later than the persist step.
+	ts.responseChunks = nil
 }
 
 // PersistentInboundTransformer wraps an inbound transformer with enhanced capabilities.
