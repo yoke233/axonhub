@@ -198,6 +198,65 @@ func TestPendingSignature_SignatureBeforeThinking(t *testing.T) {
 	require.Equal(t, "message_stop", events[10].Type)
 }
 
+func TestInboundStream_TextBeforeThinkingClosesTextBlock(t *testing.T) {
+	const (
+		id    = "msg_test_text_before_thinking"
+		model = "test-model"
+	)
+
+	responses := []*llm.Response{
+		buildChunk(id, model, withUsage(10, 1)),
+		buildChunk(id, model, withTextContent("preface")),
+		buildChunk(id, model, withReasoningContent("hidden thought")),
+		buildChunk(id, model, withTextContent("answer")),
+		buildChunk(id, model, withFinishReason("stop")),
+		buildChunk(id, model, withUsage(10, 20)),
+	}
+
+	events := collectStreamEvents(t, responses)
+
+	require.Len(t, events, 12)
+	require.Equal(t, "message_start", events[0].Type)
+
+	require.Equal(t, "content_block_start", events[1].Type)
+	require.Equal(t, int64(0), *events[1].Index)
+	require.Equal(t, "text", events[1].ContentBlock.Type)
+
+	require.Equal(t, "content_block_delta", events[2].Type)
+	require.Equal(t, int64(0), *events[2].Index)
+	require.Equal(t, "text_delta", *events[2].Delta.Type)
+	require.Equal(t, "preface", *events[2].Delta.Text)
+
+	require.Equal(t, "content_block_stop", events[3].Type)
+	require.Equal(t, int64(0), *events[3].Index)
+
+	require.Equal(t, "content_block_start", events[4].Type)
+	require.Equal(t, int64(1), *events[4].Index)
+	require.Equal(t, "thinking", events[4].ContentBlock.Type)
+
+	require.Equal(t, "content_block_delta", events[5].Type)
+	require.Equal(t, int64(1), *events[5].Index)
+	require.Equal(t, "thinking_delta", *events[5].Delta.Type)
+	require.Equal(t, "hidden thought", *events[5].Delta.Thinking)
+
+	require.Equal(t, "content_block_stop", events[6].Type)
+	require.Equal(t, int64(1), *events[6].Index)
+
+	require.Equal(t, "content_block_start", events[7].Type)
+	require.Equal(t, int64(2), *events[7].Index)
+	require.Equal(t, "text", events[7].ContentBlock.Type)
+
+	require.Equal(t, "content_block_delta", events[8].Type)
+	require.Equal(t, int64(2), *events[8].Index)
+	require.Equal(t, "text_delta", *events[8].Delta.Type)
+	require.Equal(t, "answer", *events[8].Delta.Text)
+
+	require.Equal(t, "content_block_stop", events[9].Type)
+	require.Equal(t, int64(2), *events[9].Index)
+	require.Equal(t, "message_delta", events[10].Type)
+	require.Equal(t, "message_stop", events[11].Type)
+}
+
 // TestPendingSignature_SignatureAfterThinking verifies the normal case:
 // when signature arrives after thinking has started, it is emitted immediately
 // (no buffering needed).

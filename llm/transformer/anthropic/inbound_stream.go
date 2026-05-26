@@ -251,6 +251,23 @@ func (s *anthropicInboundStream) Next() bool {
 
 		// Handle reasoning content (thinking) delta
 		if choice.Delta != nil && choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
+			// Some upstreams can emit text before thinking. Anthropic stream
+			// blocks must not share the same index, so close the text block
+			// before starting a thinking block.
+			if s.hasTextContentStarted {
+				s.hasTextContentStarted = false
+
+				if err := s.enqueEvent(&StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}); err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
+			}
+
 			// If the tool content has started before the thinking content, we need to stop it
 			if s.hasToolContentStarted {
 				s.hasToolContentStarted = false
