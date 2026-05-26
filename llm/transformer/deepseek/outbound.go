@@ -103,8 +103,13 @@ func (t *OutboundTransformer) TransformRequest(
 		Request: *oaiReq,
 	}
 
-	// Convert ReasoningEffort to Thinking if present
-	if llmReq.ReasoningEffort != "" && llmReq.ReasoningEffort != "none" {
+	// Convert ReasoningEffort to Thinking if present.
+	if llmReq.ReasoningEffort == "none" {
+		dsReq.Thinking = &Thinking{
+			Type: "disabled",
+		}
+		dsReq.Request.ReasoningEffort = ""
+	} else if llmReq.ReasoningEffort != "" {
 		dsReq.Thinking = &Thinking{
 			Type: "enabled",
 		}

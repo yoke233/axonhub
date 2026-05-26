@@ -124,29 +124,29 @@ func TestOutboundTransformer_TransformRequest_Thinking(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name            string
-		reasoningEffort string
-		expectThinking  bool
+		name             string
+		reasoningEffort  string
+		expectedThinking string
 	}{
 		{
-			name:            "reasoning effort high enables thinking",
-			reasoningEffort: "high",
-			expectThinking:  true,
+			name:             "reasoning effort high enables thinking",
+			reasoningEffort:  "high",
+			expectedThinking: "enabled",
 		},
 		{
-			name:            "reasoning effort medium enables thinking",
-			reasoningEffort: "medium",
-			expectThinking:  true,
+			name:             "reasoning effort medium enables thinking",
+			reasoningEffort:  "medium",
+			expectedThinking: "enabled",
 		},
 		{
-			name:            "reasoning effort none disables thinking",
-			reasoningEffort: "none",
-			expectThinking:  false,
+			name:             "reasoning effort none disables thinking",
+			reasoningEffort:  "none",
+			expectedThinking: "disabled",
 		},
 		{
-			name:            "empty reasoning effort disables thinking",
-			reasoningEffort: "",
-			expectThinking:  false,
+			name:             "empty reasoning effort disables thinking",
+			reasoningEffort:  "",
+			expectedThinking: "",
 		},
 	}
 
@@ -176,11 +176,15 @@ func TestOutboundTransformer_TransformRequest_Thinking(t *testing.T) {
 			err = json.Unmarshal(got.Body, &dsReq)
 			require.NoError(t, err)
 
-			if tt.expectThinking {
+			if tt.expectedThinking != "" {
 				assert.NotNil(t, dsReq.Thinking)
-				assert.Equal(t, "enabled", dsReq.Thinking.Type)
+				assert.Equal(t, tt.expectedThinking, dsReq.Thinking.Type)
 			} else {
 				assert.Nil(t, dsReq.Thinking)
+			}
+
+			if tt.reasoningEffort == "none" {
+				assert.Empty(t, dsReq.ReasoningEffort)
 			}
 		})
 	}

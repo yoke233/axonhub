@@ -24,6 +24,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/channelprobe"
 	"github.com/looplj/axonhub/internal/ent/datastorage"
 	"github.com/looplj/axonhub/internal/ent/model"
+	"github.com/looplj/axonhub/internal/ent/privacy"
 	"github.com/looplj/axonhub/internal/ent/project"
 	"github.com/looplj/axonhub/internal/ent/prompt"
 	"github.com/looplj/axonhub/internal/ent/request"
