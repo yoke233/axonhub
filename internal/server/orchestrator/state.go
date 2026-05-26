@@ -53,3 +53,52 @@ type PersistenceState struct {
 	// immediately after receiving the last chunk.
 	StreamCompleted bool
 }
+
+func (s *PersistenceState) ReleaseRequestPayloads() {
+	if s == nil {
+		return
+	}
+
+	s.ReleaseRawRequestBody()
+
+	if s.LlmRequest != nil && s.LlmRequest.RawRequest != nil {
+		s.LlmRequest.RawRequest.RawRequest = nil
+	}
+
+	s.RawRequest = nil
+	s.LlmRequest = nil
+}
+
+func (s *PersistenceState) ReleaseRawRequestBody() {
+	if s == nil {
+		return
+	}
+
+	if s.RawRequest != nil {
+		s.RawRequest.Body = nil
+		s.RawRequest.JSONBody = nil
+	}
+
+	if s.LlmRequest != nil && s.LlmRequest.RawRequest != nil {
+		s.LlmRequest.RawRequest.Body = nil
+		s.LlmRequest.RawRequest.JSONBody = nil
+	}
+}
+
+func (s *PersistenceState) NeedsRawRequestBodyForPassThrough() bool {
+	if s == nil {
+		return false
+	}
+
+	for _, candidate := range s.ChannelModelsCandidates {
+		if candidate == nil || candidate.Channel == nil || candidate.Channel.Settings == nil {
+			continue
+		}
+
+		if candidate.Channel.Settings.PassThroughBody {
+			return true
+		}
+	}
+
+	return false
+}

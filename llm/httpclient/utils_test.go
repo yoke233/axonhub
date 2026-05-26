@@ -1,8 +1,11 @@
 package httpclient
 
 import (
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -34,6 +37,45 @@ func TestIsHTTPStatusCodeRetryable(t *testing.T) {
 		require.False(t, IsHTTPStatusCodeRetryable(301))
 		require.False(t, IsHTTPStatusCodeRetryable(302))
 	})
+}
+
+func TestReadHTTPRequest_MaxBytesError(t *testing.T) {
+	rawReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("12345"))
+	recorder := httptest.NewRecorder()
+	rawReq.Body = http.MaxBytesReader(recorder, rawReq.Body, 4)
+
+	req, err := ReadHTTPRequest(rawReq)
+
+	require.Nil(t, req)
+
+	var httpErr *Error
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusRequestEntityTooLarge, httpErr.StatusCode)
+	require.Contains(t, string(httpErr.Body), "request body too large")
+}
+
+func TestReadHTTPRequest_ReusableBodyAvoidsCopy(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o"}`)
+	rawReq := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	rawReq.Body = NewReusableReadCloser(body)
+
+	req, err := ReadHTTPRequest(rawReq)
+
+	require.NoError(t, err)
+	require.Equal(t, string(body), string(req.Body))
+	require.True(t, &body[0] == &req.Body[0])
+}
+
+func TestRequestReleaseBody(t *testing.T) {
+	req := &Request{
+		Body:     []byte("request body"),
+		JSONBody: []byte(`{"body":"request"}`),
+	}
+
+	req.ReleaseBody()
+
+	require.Nil(t, req.Body)
+	require.Nil(t, req.JSONBody)
 }
 
 func TestMergeHTTPHeaders(t *testing.T) {

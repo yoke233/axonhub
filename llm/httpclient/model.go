@@ -55,9 +55,16 @@ type Request struct {
 	// SkipInboundQueryMerge when set to true, prevents query parameters from the original
 	// inbound request from being merged into this request during MergeInboundRequest.
 	SkipInboundQueryMerge bool `json:"-"`
-
 }
 
+func (r *Request) ReleaseBody() {
+	if r == nil {
+		return
+	}
+
+	r.Body = nil
+	r.JSONBody = nil
+}
 
 // AuthConfig represents authentication configuration.
 type AuthConfig struct {

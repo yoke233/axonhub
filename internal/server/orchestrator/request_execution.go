@@ -29,6 +29,12 @@ func sanitizeResponseBody(body []byte, maxLen int) []byte {
 		return body
 	}
 
+	truncated := false
+	if maxLen > 0 && len(body) > maxLen {
+		body = body[:maxLen]
+		truncated = true
+	}
+
 	str := string(body)
 
 	// Redact bearer tokens (case-insensitive), preserving the bearer prefix
@@ -40,9 +46,8 @@ func sanitizeResponseBody(body []byte, maxLen int) []byte {
 	// Redact email addresses
 	str = emailRegex.ReplaceAllString(str, "[EMAIL REDACTED]")
 
-	// Truncate if too long
-	if len(str) > maxLen {
-		str = str[:maxLen] + "..."
+	if truncated {
+		str += "..."
 	}
 
 	return []byte(str)

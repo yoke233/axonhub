@@ -46,6 +46,9 @@ func (m *persistRequestMiddleware) OnInboundLlmRequest(ctx context.Context, llmR
 	}
 
 	m.inbound.state.Request = request
+	if !m.inbound.state.NeedsRawRequestBodyForPassThrough() {
+		m.inbound.state.ReleaseRawRequestBody()
+	}
 
 	return llmRequest, nil
 }

@@ -16,6 +16,16 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 )
 
+const debugBodyPreviewBytes = 4096
+
+func bodyPreview(body []byte) []byte {
+	if len(body) <= debugBodyPreviewBytes {
+		return body
+	}
+
+	return body[:debugBodyPreviewBytes]
+}
+
 // HttpClient implements the HttpClient interface.
 type HttpClient struct {
 	client      *http.Client
@@ -195,6 +205,7 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 	if err != nil {
 		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
+	defer request.ReleaseBody()
 
 	rawReq.Header.Set("Accept", "application/json")
 
@@ -221,7 +232,8 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 				slog.String("method", rawReq.Method),
 				slog.String("url", rawReq.URL.String()),
 				slog.Int("status_code", rawResp.StatusCode),
-				slog.String("body", string(body)))
+				slog.Int("body_bytes", len(body)),
+				slog.String("body_preview", string(bodyPreview(body))))
 		}
 
 		return nil, &Error{
@@ -239,7 +251,8 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 			slog.String("method", rawReq.Method),
 			slog.String("url", rawReq.URL.String()),
 			slog.Int("status_code", rawResp.StatusCode),
-			slog.String("body", string(body)))
+			slog.Int("body_bytes", len(body)),
+			slog.String("body_preview", string(bodyPreview(body))))
 	}
 
 	// Build generic response
@@ -264,6 +277,7 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	if err != nil {
 		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
+	defer request.ReleaseBody()
 
 	// Add streaming headers
 	rawReq.Header.Set("Accept", "text/event-stream")
@@ -296,7 +310,8 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 				slog.String("method", rawReq.Method),
 				slog.String("url", rawReq.URL.String()),
 				slog.Int("status_code", rawResp.StatusCode),
-				slog.String("body", string(body)))
+				slog.Int("body_bytes", len(body)),
+				slog.String("body_preview", string(bodyPreview(body))))
 		}
 
 		return nil, &Error{

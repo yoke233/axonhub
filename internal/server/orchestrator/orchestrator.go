@@ -154,7 +154,8 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 	strategy := deriveLoadBalancerStrategy(retryPolicy, apiKey)
 	if log.DebugEnabled(ctx) {
 		log.Debug(ctx, "chat request received",
-			log.String("request_body", string(request.Body)),
+			log.Int("request_body_bytes", len(request.Body)),
+			log.ByteString("request_body_preview", previewBytes(request.Body, 4096)),
 			log.Any("request_headers", request.Headers),
 			log.Any("retry_policy", retryPolicy),
 			log.String("system_load_balance_strategy", retryPolicy.LoadBalancerStrategy),
@@ -189,6 +190,7 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		Proxy:                 processor.proxy,
 		CurrentCandidateIndex: 0,
 	}
+	defer state.ReleaseRequestPayloads()
 
 	var pipelineOpts []pipeline.Option
 
@@ -304,4 +306,12 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		ChatCompletion:       result.Response,
 		ChatCompletionStream: nil,
 	}, nil
+}
+
+func previewBytes(body []byte, limit int) []byte {
+	if limit <= 0 || len(body) <= limit {
+		return body
+	}
+
+	return body[:limit]
 }

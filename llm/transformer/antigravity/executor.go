@@ -342,13 +342,10 @@ func (e *Executor) cloneRequestForEndpoint(request *httpclient.Request, endpoint
 		}
 	}
 
-	if len(request.Body) > 0 {
-		copied.Body = append([]byte(nil), request.Body...)
-	}
-
-	if len(request.JSONBody) > 0 {
-		copied.JSONBody = append([]byte(nil), request.JSONBody...)
-	}
+	// Body and JSONBody are immutable after request construction. Share their
+	// backing arrays across endpoint attempts to avoid duplicating large payloads.
+	copied.Body = request.Body
+	copied.JSONBody = request.JSONBody
 
 	if len(request.Metadata) > 0 {
 		copied.Metadata = make(map[string]string, len(request.Metadata))

@@ -97,6 +97,10 @@ func (ts *InboundPersistentStream) Close() error {
 	}
 
 	ts.closed = true
+	defer func() {
+		ts.responseChunks = nil
+	}()
+
 	ctx := ts.ctx
 
 	log.Debug(ctx, "Closing persistent stream", log.Int("chunk_count", len(ts.responseChunks)), log.Bool("received_done", ts.state.StreamCompleted))
@@ -229,9 +233,8 @@ func (ts *InboundPersistentStream) _persistResponse(ctx context.Context, respons
 	}
 
 	// Drop the chunk slice so the underlying StreamEvent backing array can be
-	// reclaimed by GC immediately. Without this, the slice (which for long
-	// streams can hold hundreds of KB per request) lingers until the stream
-	// wrapper itself is collected — which is later than the persist step.
+	// reclaimed by GC immediately. Without this, the slice lingers until the
+	// stream wrapper itself is collected, which is later than the persist step.
 	ts.responseChunks = nil
 }
 

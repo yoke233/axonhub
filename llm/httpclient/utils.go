@@ -1,6 +1,8 @@
 package httpclient
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +12,26 @@ import (
 
 	"github.com/samber/lo"
 )
+
+type ReusableReadCloser struct {
+	*bytes.Reader
+	body []byte
+}
+
+func NewReusableReadCloser(body []byte) *ReusableReadCloser {
+	return &ReusableReadCloser{
+		Reader: bytes.NewReader(body),
+		body:   body,
+	}
+}
+
+func (r *ReusableReadCloser) Close() error {
+	return nil
+}
+
+func (r *ReusableReadCloser) RawBytes() []byte {
+	return r.body
+}
 
 func ReadHTTPRequest(rawReq *http.Request) (*Request, error) {
 	req := &Request{
@@ -25,8 +47,24 @@ func ReadHTTPRequest(rawReq *http.Request) (*Request, error) {
 		RawRequest: rawReq,
 	}
 
+	if reusableBody, ok := rawReq.Body.(interface{ RawBytes() []byte }); ok {
+		req.Body = reusableBody.RawBytes()
+		return req, nil
+	}
+
 	body, err := io.ReadAll(rawReq.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, &Error{
+				Method:     rawReq.Method,
+				URL:        rawReq.URL.String(),
+				StatusCode: http.StatusRequestEntityTooLarge,
+				Status:     http.StatusText(http.StatusRequestEntityTooLarge),
+				Body:       []byte(fmt.Sprintf(`{"error":{"message":"request body too large: limit is %d bytes","type":"request_entity_too_large"}}`, maxBytesErr.Limit)),
+			}
+		}
+
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
 

@@ -142,8 +142,10 @@ func applyOverrideRequestBody(outbound *PersistentOutboundTransformer) pipeline.
 				log.String("channel", channel.Name),
 				log.Int("channel_id", channel.ID),
 				log.Any("operations", ops),
-				log.String("old_body", string(request.Body)),
-				log.String("new_body", string(body)),
+				log.Int("old_body_bytes", len(request.Body)),
+				log.ByteString("old_body_preview", previewBytes(request.Body, 4096)),
+				log.Int("new_body_bytes", len(body)),
+				log.ByteString("new_body_preview", previewBytes(body, 4096)),
 			)
 		}
 
@@ -339,17 +341,19 @@ func applyPassThroughBody(outbound *PersistentOutboundTransformer) pipeline.Midd
 }
 
 func mergePassThroughBody(rawBody []byte, apiFormat llm.APIFormat, model string) ([]byte, error) {
-	body := append([]byte(nil), rawBody...)
-
 	if !passThroughBodyNeedsModelPatch(apiFormat) {
-		return body, nil
+		return rawBody, nil
 	}
 
 	if model == "" {
-		return body, nil
+		return rawBody, nil
 	}
 
-	nextBody, err := sjson.SetBytes(body, "model", model)
+	if currentModel := gjson.GetBytes(rawBody, "model"); currentModel.Exists() && currentModel.String() == model {
+		return rawBody, nil
+	}
+
+	nextBody, err := sjson.SetBytes(rawBody, "model", model)
 	if err != nil {
 		return nil, fmt.Errorf("set model in pass-through body: %w", err)
 	}

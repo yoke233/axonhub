@@ -98,6 +98,10 @@ func (ts *OutboundPersistentStream) Close() error {
 	}
 
 	ts.closed = true
+	defer func() {
+		ts.responseChunks = nil
+	}()
+
 	ctx := ts.ctx
 
 	log.Debug(ctx, "Closing persistent stream", log.Int("chunk_count", len(ts.responseChunks)), log.Bool("received_done", ts.state.StreamCompleted))

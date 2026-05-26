@@ -410,6 +410,16 @@ func TestMergePassThroughBodySkipsFormatsWithoutTopLevelModel(t *testing.T) {
 	merged, err := mergePassThroughBody(rawBody, llm.APIFormatGeminiContents, "gemini-2.5-pro")
 	require.NoError(t, err)
 	require.Equal(t, string(rawBody), string(merged))
+	require.True(t, &rawBody[0] == &merged[0])
+}
+
+func TestMergePassThroughBodyReusesBodyWhenModelAlreadyMatches(t *testing.T) {
+	rawBody := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+
+	merged, err := mergePassThroughBody(rawBody, llm.APIFormatOpenAIChatCompletion, "gpt-4o")
+	require.NoError(t, err)
+	require.Equal(t, string(rawBody), string(merged))
+	require.True(t, &rawBody[0] == &merged[0])
 }
 
 // TestOverrideParameters tests that TransformRequest works correctly.

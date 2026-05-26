@@ -115,6 +115,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		adminGroup.POST(
 			"/playground/chat",
 			middleware.WithTimeout(server.Config.LLMRequestTimeout),
+			middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
 			middleware.WithSource(request.SourcePlayground),
 			handlers.Playground.ChatCompletion,
 		)
@@ -171,6 +172,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 
 	apiGroup := server.Group("/",
 		middleware.WithTimeout(server.Config.LLMRequestTimeout),
+		middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
 		middleware.WithAPIKeyConfig(services.AuthService, nil),
 		middleware.WithSource(request.SourceAPI),
 		middleware.WithThread(server.Config.Trace, services.ThreadService),
@@ -227,6 +229,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 
 		geminiGroup := server.Group("/gemini/:gemini-api-version",
 			middleware.WithTimeout(server.Config.LLMRequestTimeout),
+			middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
 			middleware.WithGeminiKeyAuth(services.AuthService),
 			middleware.WithSource(request.SourceAPI),
 			middleware.WithThread(server.Config.Trace, services.ThreadService),
@@ -238,6 +241,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		// Alias for Gemini API
 		geminiAliasGroup := server.Group("/v1beta",
 			middleware.WithTimeout(server.Config.LLMRequestTimeout),
+			middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
 			middleware.WithGeminiKeyAuth(services.AuthService),
 			middleware.WithSource(request.SourceAPI),
 			middleware.WithThread(server.Config.Trace, services.ThreadService),

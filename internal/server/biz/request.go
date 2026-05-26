@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/eko/gocache/lib/v4/store"
@@ -66,6 +67,70 @@ func (s *RequestService) shouldUseExternalStorage(_ context.Context, ds *ent.Dat
 
 // _InvalidRequestBodyJSON returns a JSON object indicating invalid text.
 var _InvalidRequestBodyJSON = objects.JSONRawMessage(`{"message":"invalid text"}`)
+
+var (
+	storedDataURLBase64Pattern = regexp.MustCompile(`data:([^;"\\]+);base64,[A-Za-z0-9+/=_-]+`)
+	storedB64JSONFieldPattern  = regexp.MustCompile(`("b64_json"\s*:\s*")[^"\\]*(")`)
+)
+
+func sanitizeStoredPayload(body objects.JSONRawMessage) objects.JSONRawMessage {
+	if len(body) == 0 {
+		return body
+	}
+
+	// Keep the request forwarded to upstream intact, but avoid persisting huge
+	// inline media blobs in request/response history.
+	if bytes.Contains(body, []byte(";base64,")) {
+		body = storedDataURLBase64Pattern.ReplaceAll(body, []byte(`data:$1;base64,[redacted]`))
+	}
+
+	if bytes.Contains(body, []byte(`"b64_json"`)) {
+		body = storedB64JSONFieldPattern.ReplaceAll(body, []byte(`${1}[redacted]${2}`))
+	}
+
+	return body
+}
+
+func storedPayloadFromBytes(body []byte) (objects.JSONRawMessage, error) {
+	if json.Valid(body) {
+		return sanitizeStoredPayload(objects.JSONRawMessage(body)), nil
+	}
+
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	return sanitizeStoredPayload(objects.JSONRawMessage(b)), nil
+}
+
+func storedPayloadFromHTTPBody(jsonBody, body []byte) (objects.JSONRawMessage, error) {
+	if len(jsonBody) > 0 {
+		return storedPayloadFromBytes(jsonBody)
+	}
+
+	return storedPayloadFromBytes(body)
+}
+
+func storedPayloadFromAny(payload any) (objects.JSONRawMessage, error) {
+	switch v := payload.(type) {
+	case []byte:
+		return storedPayloadFromBytes(v)
+	case objects.JSONRawMessage:
+		return storedPayloadFromBytes(v)
+	case json.RawMessage:
+		return storedPayloadFromBytes(v)
+	case string:
+		return storedPayloadFromBytes([]byte(v))
+	default:
+		b, err := xjson.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+
+		return sanitizeStoredPayload(b), nil
+	}
+}
 
 // GenerateRequestBodyKey generates the storage key for request body.
 func GenerateRequestBodyKey(projectID, requestID int) string {
@@ -138,10 +203,8 @@ func (s *RequestService) CreateRequest(
 	)
 
 	if storeRequestBody {
-		if len(httpRequest.JSONBody) > 0 {
-			requestBodyBytes = httpRequest.JSONBody
-		} else {
-			b, err := xjson.Marshal(httpRequest.Body)
+		if httpRequest != nil {
+			b, err := storedPayloadFromHTTPBody(httpRequest.JSONBody, httpRequest.Body)
 			if err != nil {
 				log.Error(ctx, "Failed to serialize request body", log.Cause(err))
 				return nil, err
@@ -258,17 +321,13 @@ func (s *RequestService) CreateRequestExecution(
 	)
 
 	if storeRequestBody {
-		if len(channelRequest.JSONBody) > 0 {
-			requestBodyBytes = channelRequest.JSONBody
-		} else {
-			b, err := xjson.Marshal(channelRequest.Body)
-			if err != nil {
-				log.Error(ctx, "Failed to marshal request body", log.Cause(err))
-				return nil, err
-			}
-
-			requestBodyBytes = b
+		b, err := storedPayloadFromHTTPBody(channelRequest.JSONBody, channelRequest.Body)
+		if err != nil {
+			log.Error(ctx, "Failed to marshal request body", log.Cause(err))
+			return nil, err
 		}
+
+		requestBodyBytes = b
 
 		if len(channelRequest.Headers) > 0 {
 			requestHeadersBytes, _ = xjson.Marshal(httpclient.MaskSensitiveHeaders(channelRequest.Headers))
@@ -409,7 +468,7 @@ func (s *RequestService) UpdateRequestCompleted(
 	}
 
 	if storeResponseBody {
-		responseBodyBytes, err := xjson.Marshal(responseBody)
+		responseBodyBytes, err := storedPayloadFromAny(responseBody)
 		if err != nil {
 			log.Error(ctx, "Failed to serialize response body", log.Cause(err))
 			return err
@@ -496,7 +555,7 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 	}
 
 	if storeResponseBody {
-		responseBodyBytes, err := xjson.Marshal(responseBody)
+		responseBodyBytes, err := storedPayloadFromAny(responseBody)
 		if err != nil {
 			log.Error(ctx, "Failed to serialize response body", log.Cause(err))
 			return err
@@ -581,7 +640,7 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 	}
 
 	if storeResponseBody {
-		responseBodyBytes, err := xjson.Marshal(responseBody)
+		responseBodyBytes, err := storedPayloadFromAny(responseBody)
 		if err != nil {
 			return err
 		}
@@ -721,6 +780,7 @@ func (s *RequestService) SaveRequestExecutionChunks(
 
 			continue
 		}
+		b = sanitizeStoredPayload(b)
 
 		chunkBytes = append(chunkBytes, b)
 	}
@@ -813,6 +873,7 @@ func (s *RequestService) SaveRequestChunks(
 
 			continue
 		}
+		b = sanitizeStoredPayload(b)
 
 		chunkBytes = append(chunkBytes, b)
 	}

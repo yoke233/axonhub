@@ -19,6 +19,10 @@ type Config struct {
 	// LLMRequestTimeout is the maximum duration for processing a request to LLM.
 	LLMRequestTimeout time.Duration `conf:"llm_request_timeout" yaml:"llm_request_timeout" json:"llm_request_timeout"`
 
+	// MaxRequestBodyBytes is the maximum accepted request body size for LLM API
+	// endpoints. Set to 0 to disable the limit.
+	MaxRequestBodyBytes int64 `conf:"max_request_body_bytes" yaml:"max_request_body_bytes" json:"max_request_body_bytes"`
+
 	Trace     tracing.Config `conf:"trace" yaml:"trace" json:"trace"`
 	Dashboard Dashboard      `conf:"dashboard" yaml:"dashboard" json:"dashboard"`
 

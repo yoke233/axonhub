@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +16,7 @@ import (
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/internal/tracing"
+	"github.com/looplj/axonhub/llm/httpclient"
 	anthropicfmt "github.com/looplj/axonhub/llm/transformer/anthropic"
 	"github.com/looplj/axonhub/llm/transformer/anthropic/claudecode"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
@@ -31,11 +32,11 @@ const cachedBodyKey = "axonhub.middleware.cached_body"
 // subsequent calls within the same request avoid re-reading the body. The body
 // reader is reset to a fresh bytes.Reader on every call (even on cache hits) so
 // downstream handlers always see the full payload, matching the original
-// "ReadAll + NopCloser" pattern. The returned slice MUST be treated as read-only.
+// "ReadAll + reset reader" pattern. The returned slice MUST be treated as read-only.
 func peekRequestBody(c *gin.Context) ([]byte, error) {
 	if v, ok := c.Get(cachedBodyKey); ok {
 		if b, ok := v.([]byte); ok {
-			c.Request.Body = io.NopCloser(bytes.NewReader(b))
+			c.Request.Body = httpclient.NewReusableReadCloser(b)
 			return b, nil
 		}
 	}
@@ -49,7 +50,7 @@ func peekRequestBody(c *gin.Context) ([]byte, error) {
 		return nil, err
 	}
 
-	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.Body = httpclient.NewReusableReadCloser(body)
 	c.Set(cachedBodyKey, body)
 
 	return body, nil
@@ -107,6 +108,16 @@ func tryGetTraceIDFromBody(c *gin.Context, config tracing.Config) (string, error
 	return "", nil
 }
 
+func abortTraceExtractionError(c *gin.Context, err error) {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		AbortWithError(c, http.StatusRequestEntityTooLarge, fmt.Errorf("request body too large: limit is %d bytes", maxBytesErr.Limit))
+		return
+	}
+
+	AbortWithError(c, http.StatusBadRequest, err)
+}
+
 // WithTrace is a middleware that extracts the X-Trace-ID header and
 // gets or creates the corresponding trace entity in the database.
 func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.HandlerFunc {
@@ -117,7 +128,7 @@ func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.Handle
 
 			traceID, err = tryExtractTraceIDFromClaudeCodeRequest(c, config)
 			if err != nil {
-				AbortWithError(c, http.StatusBadRequest, err)
+				abortTraceExtractionError(c, err)
 				return
 			}
 		}
@@ -131,7 +142,7 @@ func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.Handle
 
 			traceID, err = tryExtractAnthropicPromptCacheTraceID(c)
 			if err != nil {
-				AbortWithError(c, http.StatusBadRequest, err)
+				abortTraceExtractionError(c, err)
 				return
 			}
 		}
@@ -141,7 +152,7 @@ func WithTrace(config tracing.Config, traceService *biz.TraceService) gin.Handle
 
 			traceID, err = tryGetTraceIDFromBody(c, config)
 			if err != nil {
-				AbortWithError(c, http.StatusBadRequest, err)
+				abortTraceExtractionError(c, err)
 				return
 			}
 		}
