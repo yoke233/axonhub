@@ -207,10 +207,14 @@ metrics:
 ```yaml
 gc:
   cron: "0 2 * * *"              # Cron expression for GC execution
+  batch_size: 500                # Records deleted per batch
+  batch_throttle: "150ms"        # Delay between cleanup batches
 ```
 
 **Environment Variables:**
 - `AXONHUB_GC_CRON`
+- `AXONHUB_GC_BATCH_SIZE`
+- `AXONHUB_GC_BATCH_THROTTLE`
 
 ### Provider Quota Configuration
 

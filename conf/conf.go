@@ -192,6 +192,8 @@ func setDefaults(v *viper.Viper) {
 
 	// GC defaults
 	v.SetDefault("gc.cron", "0 2 * * *") // Daily at 2:00 AM
+	v.SetDefault("gc.batch_size", 500)
+	v.SetDefault("gc.batch_throttle", "150ms")
 	v.SetDefault("gc.vacuum_enabled", false)
 	v.SetDefault("gc.vacuum_full", false)
 

@@ -121,6 +121,8 @@ gc:
                                  # "0 2 * * *"     - Daily at 2:00 AM
                                  # "0 3 * * 0"     - Weekly on Sunday at 3:00 AM
                                  # "0 4 1 * *"     - Monthly on 1st day at 4:00 AM
+  batch_size: 500                # Records deleted per cleanup batch (env: AXONHUB_GC_BATCH_SIZE)
+  batch_throttle: "150ms"        # Delay between cleanup batches (env: AXONHUB_GC_BATCH_THROTTLE)
   vacuum_enabled: false          # Enable VACUUM after cleanup (env: AXONHUB_GC_VACUUM_ENABLED)
                                  # Supported for SQLite and PostgreSQL
                                  # SQLite: Rebuilds database file to reclaim space

@@ -207,10 +207,14 @@ metrics:
 ```yaml
 gc:
   cron: "0 2 * * *"              # GC 执行的 Cron 表达式
+  batch_size: 500                # 每批删除的记录数
+  batch_throttle: "150ms"        # 每批之间的等待时间
 ```
 
 **环境变量：**
 - `AXONHUB_GC_CRON`
+- `AXONHUB_GC_BATCH_SIZE`
+- `AXONHUB_GC_BATCH_THROTTLE`
 
 ### GitHub Copilot OAuth 配置
 

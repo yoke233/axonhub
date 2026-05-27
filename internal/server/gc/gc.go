@@ -23,14 +23,18 @@ import (
 	"github.com/looplj/axonhub/internal/server/biz"
 )
 
-// defaultBatchSize is the default batch size for cleanup operations
-// This can be overridden for testing.
-var defaultBatchSize = 500
+// defaultBatchSize is conservative because request rows can contain large bodies.
+// This can be overridden by config or tests.
+var defaultBatchSize = 50
+
+var defaultBatchThrottle = 150 * time.Millisecond
 
 type Config struct {
-	CRON          string `json:"cron" yaml:"cron" conf:"cron" validate:"required"`
-	VacuumEnabled bool   `json:"vacuum_enabled" yaml:"vacuum_enabled" conf:"vacuum_enabled"`
-	VacuumFull    bool   `json:"vacuum_full" yaml:"vacuum_full" conf:"vacuum_full"`
+	CRON          string        `json:"cron" yaml:"cron" conf:"cron" validate:"required"`
+	BatchSize     int           `json:"batch_size" yaml:"batch_size" conf:"batch_size"`
+	BatchThrottle time.Duration `json:"batch_throttle" yaml:"batch_throttle" conf:"batch_throttle"`
+	VacuumEnabled bool          `json:"vacuum_enabled" yaml:"vacuum_enabled" conf:"vacuum_enabled"`
+	VacuumFull    bool          `json:"vacuum_full" yaml:"vacuum_full" conf:"vacuum_full"`
 }
 
 // Worker handles garbage collection and cleanup operations.
@@ -63,38 +67,94 @@ func NewWorker(params Params) *Worker {
 	}
 }
 
-// deleteInBatches deletes records in batches to avoid memory issues
-// This function repeatedly executes the delete query until no more records are deleted.
-func (w *Worker) deleteInBatches(ctx context.Context, deleteFunc func() (int, error)) (int, error) {
+// deleteIDsInBatches deletes records by small ID batches to limit DB/WAL pressure.
+func (w *Worker) deleteIDsInBatches(
+	ctx context.Context,
+	resource string,
+	queryIDs func(context.Context, int) ([]int, error),
+	deleteIDs func(context.Context, []int) (int, error),
+) (int, error) {
 	totalDeleted := 0
+	batchSize := w.getBatchSize()
 
 	for {
-		// Delete a batch of records
-		deleted, err := deleteFunc()
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
+		ids, err := queryIDs(ctx, batchSize)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("failed to delete batch: %w", err)
+			return totalDeleted, fmt.Errorf("failed to query %s batch IDs: %w", resource, err)
+		}
+
+		if len(ids) == 0 {
+			break
+		}
+
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
+		deleted, err := deleteIDs(ctx, ids)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("failed to delete %s batch: %w", resource, err)
 		}
 
 		if deleted == 0 {
-			// No more records to delete
+			log.Warn(ctx, "No records were deleted for queried cleanup batch",
+				log.String("resource", resource),
+				log.Int("queried_count", len(ids)),
+				log.Int("total_deleted", totalDeleted))
+
 			break
 		}
 
 		totalDeleted += deleted
-		log.Debug(ctx, "Deleted batch of records", log.Int("batch_size", deleted), log.Int("total_deleted", totalDeleted))
+		log.Debug(ctx, "Deleted cleanup batch",
+			log.String("resource", resource),
+			log.Int("batch_size", deleted),
+			log.Int("total_deleted", totalDeleted))
+
+		if err := w.sleepBetweenBatches(ctx); err != nil {
+			return totalDeleted, err
+		}
 	}
 
 	return totalDeleted, nil
 }
 
-// getBatchSize returns the appropriate batch size for cleanup operations
-// Returns 10 for test environment, 500 for production.
+func (w *Worker) sleepBetweenBatches(ctx context.Context) error {
+	throttle := w.getBatchThrottle()
+	if throttle <= 0 {
+		return ctx.Err()
+	}
+
+	timer := time.NewTimer(throttle)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// getBatchSize returns the configured batch size for cleanup operations.
 func (w *Worker) getBatchSize() int {
-	// Check if running in test mode by checking context or environment
-	// For now, use a default batch size that can be overridden via config if needed
-	// In production, this should return 500
-	// In tests, it can be overridden to 10
+	if w != nil && w.Config.BatchSize > 0 {
+		return w.Config.BatchSize
+	}
+
 	return defaultBatchSize
+}
+
+func (w *Worker) getBatchThrottle() time.Duration {
+	if w != nil && w.Config.BatchThrottle > 0 {
+		return w.Config.BatchThrottle
+	}
+
+	return defaultBatchThrottle
 }
 
 func (w *Worker) Start(ctx context.Context) error {
@@ -258,6 +318,10 @@ func (w *Worker) cleanupOldRequestExecutions(ctx context.Context, cutoffTime tim
 	cache := make(map[int]*ent.DataStorage)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
 		executions, err := w.Ent.RequestExecution.Query().
 			Select(
 				requestexecution.FieldID,
@@ -277,6 +341,10 @@ func (w *Worker) cleanupOldRequestExecutions(ctx context.Context, cutoffTime tim
 			break
 		}
 
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
 		ids := make([]int, len(executions))
 
 		for i, exec := range executions {
@@ -284,18 +352,31 @@ func (w *Worker) cleanupOldRequestExecutions(ctx context.Context, cutoffTime tim
 			w.cleanupExecutionExternalStorage(ctx, exec, cache)
 		}
 
-		if _, err := w.Ent.RequestExecution.Delete().
+		deleted, err := w.Ent.RequestExecution.Delete().
 			Where(requestexecution.IDIn(ids...)).
-			Exec(ctx); err != nil {
+			Exec(ctx)
+		if err != nil {
 			return totalDeleted, fmt.Errorf("failed to delete request executions batch: %w", err)
 		}
 
+		if deleted == 0 {
+			log.Warn(ctx, "No request executions were deleted for queried cleanup batch",
+				log.Int("queried_count", len(ids)),
+				log.Int("total_deleted", totalDeleted))
+
+			break
+		}
+
 		log.Debug(ctx, "Deleted old request executions batch",
-			log.Int("deleted_executions_count", len(ids)),
+			log.Int("deleted_executions_count", deleted),
 			log.Time("cutoff_time", cutoffTime),
 		)
 
-		totalDeleted += len(ids)
+		totalDeleted += deleted
+
+		if err := w.sleepBetweenBatches(ctx); err != nil {
+			return totalDeleted, err
+		}
 	}
 
 	return totalDeleted, nil
@@ -307,6 +388,10 @@ func (w *Worker) cleanupOldRequestsRecords(ctx context.Context, cutoffTime time.
 	cache := make(map[int]*ent.DataStorage)
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
 		reqs, err := w.Ent.Request.Query().
 			Select(
 				request.FieldID,
@@ -325,19 +410,36 @@ func (w *Worker) cleanupOldRequestsRecords(ctx context.Context, cutoffTime time.
 			break
 		}
 
+		if err := ctx.Err(); err != nil {
+			return totalDeleted, err
+		}
+
 		ids := make([]int, len(reqs))
 		for i, req := range reqs {
 			ids[i] = req.ID
 			w.cleanupRequestExternalStorage(ctx, req, cache)
 		}
 
-		if _, err := w.Ent.Request.Delete().
+		deleted, err := w.Ent.Request.Delete().
 			Where(request.IDIn(ids...)).
-			Exec(ctx); err != nil {
+			Exec(ctx)
+		if err != nil {
 			return totalDeleted, fmt.Errorf("failed to delete requests batch: %w", err)
 		}
 
-		totalDeleted += len(ids)
+		if deleted == 0 {
+			log.Warn(ctx, "No requests were deleted for queried cleanup batch",
+				log.Int("queried_count", len(ids)),
+				log.Int("total_deleted", totalDeleted))
+
+			break
+		}
+
+		totalDeleted += deleted
+
+		if err := w.sleepBetweenBatches(ctx); err != nil {
+			return totalDeleted, err
+		}
 	}
 
 	return totalDeleted, nil
@@ -444,10 +546,20 @@ func (w *Worker) cleanupUsageLogs(ctx context.Context, cleanupDays int, manual b
 		cutoffTime = time.Now()
 	}
 
-	// Delete usage logs in batches
-	result, err := w.deleteInBatches(ctx, func() (int, error) {
-		return w.Ent.UsageLog.Delete().Where(usagelog.CreatedAtLT(cutoffTime)).Exec(ctx)
-	})
+	result, err := w.deleteIDsInBatches(ctx, "usage_logs",
+		func(ctx context.Context, batchSize int) ([]int, error) {
+			return w.Ent.UsageLog.Query().
+				Where(usagelog.CreatedAtLT(cutoffTime)).
+				Order(ent.Asc(usagelog.FieldID)).
+				Limit(batchSize).
+				IDs(ctx)
+		},
+		func(ctx context.Context, ids []int) (int, error) {
+			return w.Ent.UsageLog.Delete().
+				Where(usagelog.IDIn(ids...)).
+				Exec(ctx)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to delete old usage logs: %w", err)
 	}
@@ -471,10 +583,20 @@ func (w *Worker) cleanupThreads(ctx context.Context, cleanupDays int, manual boo
 		cutoffTime = time.Now()
 	}
 
-	// Delete threads in batches
-	result, err := w.deleteInBatches(ctx, func() (int, error) {
-		return w.Ent.Thread.Delete().Where(thread.CreatedAtLT(cutoffTime)).Exec(ctx)
-	})
+	result, err := w.deleteIDsInBatches(ctx, "threads",
+		func(ctx context.Context, batchSize int) ([]int, error) {
+			return w.Ent.Thread.Query().
+				Where(thread.CreatedAtLT(cutoffTime)).
+				Order(ent.Asc(thread.FieldID)).
+				Limit(batchSize).
+				IDs(ctx)
+		},
+		func(ctx context.Context, ids []int) (int, error) {
+			return w.Ent.Thread.Delete().
+				Where(thread.IDIn(ids...)).
+				Exec(ctx)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to delete old threads: %w", err)
 	}
@@ -498,10 +620,20 @@ func (w *Worker) cleanupTraces(ctx context.Context, cleanupDays int, manual bool
 		cutoffTime = time.Now()
 	}
 
-	// Delete traces in batches
-	result, err := w.deleteInBatches(ctx, func() (int, error) {
-		return w.Ent.Trace.Delete().Where(trace.CreatedAtLT(cutoffTime)).Exec(ctx)
-	})
+	result, err := w.deleteIDsInBatches(ctx, "traces",
+		func(ctx context.Context, batchSize int) ([]int, error) {
+			return w.Ent.Trace.Query().
+				Where(trace.CreatedAtLT(cutoffTime)).
+				Order(ent.Asc(trace.FieldID)).
+				Limit(batchSize).
+				IDs(ctx)
+		},
+		func(ctx context.Context, ids []int) (int, error) {
+			return w.Ent.Trace.Delete().
+				Where(trace.IDIn(ids...)).
+				Exec(ctx)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to delete old traces: %w", err)
 	}
@@ -525,9 +657,20 @@ func (w *Worker) cleanupChannelProbes(ctx context.Context, cleanupDays int, manu
 		cutoffTime = time.Now()
 	}
 
-	result, err := w.deleteInBatches(ctx, func() (int, error) {
-		return w.Ent.ChannelProbe.Delete().Where(channelprobe.TimestampLT(cutoffTime.Unix())).Exec(ctx)
-	})
+	result, err := w.deleteIDsInBatches(ctx, "channel_probes",
+		func(ctx context.Context, batchSize int) ([]int, error) {
+			return w.Ent.ChannelProbe.Query().
+				Where(channelprobe.TimestampLT(cutoffTime.Unix())).
+				Order(ent.Asc(channelprobe.FieldID)).
+				Limit(batchSize).
+				IDs(ctx)
+		},
+		func(ctx context.Context, ids []int) (int, error) {
+			return w.Ent.ChannelProbe.Delete().
+				Where(channelprobe.IDIn(ids...)).
+				Exec(ctx)
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to delete old channel probes: %w", err)
 	}

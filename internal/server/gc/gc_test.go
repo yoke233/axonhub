@@ -2,6 +2,8 @@ package gc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,8 +16,13 @@ import (
 
 	"github.com/looplj/axonhub/internal/authz"
 	"github.com/looplj/axonhub/internal/ent"
+	"github.com/looplj/axonhub/internal/ent/channelprobe"
 	"github.com/looplj/axonhub/internal/ent/datastorage"
 	"github.com/looplj/axonhub/internal/ent/enttest"
+	"github.com/looplj/axonhub/internal/ent/schema/schematype"
+	"github.com/looplj/axonhub/internal/ent/thread"
+	"github.com/looplj/axonhub/internal/ent/trace"
+	"github.com/looplj/axonhub/internal/ent/usagelog"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
 	"github.com/looplj/axonhub/internal/server/biz"
@@ -42,6 +49,30 @@ func TestWorker_getBatchSize(t *testing.T) {
 	batchSize = worker.getBatchSize()
 	if batchSize != 20 {
 		t.Errorf("Expected batch size 20, got %d", batchSize)
+	}
+
+	worker.Config.BatchSize = 7
+	batchSize = worker.getBatchSize()
+	if batchSize != 7 {
+		t.Errorf("Expected configured batch size 7, got %d", batchSize)
+	}
+}
+
+func TestWorker_getBatchThrottle(t *testing.T) {
+	worker := &Worker{
+		Ent:    nil,
+		Config: Config{CRON: "0 0 * * *"},
+	}
+
+	batchThrottle := worker.getBatchThrottle()
+	if batchThrottle != defaultBatchThrottle {
+		t.Errorf("Expected batch throttle %s, got %s", defaultBatchThrottle, batchThrottle)
+	}
+
+	worker.Config.BatchThrottle = 25 * time.Millisecond
+	batchThrottle = worker.getBatchThrottle()
+	if batchThrottle != 25*time.Millisecond {
+		t.Errorf("Expected configured batch throttle 25ms, got %s", batchThrottle)
 	}
 }
 
@@ -204,41 +235,200 @@ func pathForKey(baseDir, key string) string {
 	return filepath.Join(baseDir, filepath.FromSlash(rel))
 }
 
-func TestWorker_deleteInBatches(t *testing.T) {
-	// Test that the deleteInBatches method works correctly
-	// This test verifies the loop logic without needing a real database
+func TestWorker_deleteIDsInBatches(t *testing.T) {
 	worker := &Worker{
 		Ent:    nil,
-		Config: Config{CRON: "0 0 * * *"},
+		Config: Config{CRON: "0 0 * * *", BatchThrottle: time.Nanosecond},
 	}
 
-	// Simulate batch deletion - delete 3 times, with decreasing counts
-	callCount := 0
-	deleteFunc := func() (int, error) {
-		callCount++
-		if callCount == 1 {
-			return 30, nil
-		} else if callCount == 2 {
-			return 15, nil
-		} else {
-			return 0, nil
+	queryCount := 0
+	deleteCount := 0
+	queryIDs := func(ctx context.Context, batchSize int) ([]int, error) {
+		queryCount++
+		if batchSize != defaultBatchSize {
+			t.Fatalf("Expected batch size %d, got %d", defaultBatchSize, batchSize)
+		}
+
+		switch queryCount {
+		case 1:
+			return []int{1, 2, 3}, nil
+		case 2:
+			return []int{4, 5}, nil
+		default:
+			return nil, nil
 		}
 	}
+	deleteIDs := func(ctx context.Context, ids []int) (int, error) {
+		deleteCount++
+		return len(ids), nil
+	}
 
-	deleted, err := worker.deleteInBatches(context.Background(), deleteFunc)
+	deleted, err := worker.deleteIDsInBatches(context.Background(), "test_records", queryIDs, deleteIDs)
 	if err != nil {
-		t.Fatalf("deleteInBatches failed: %v", err)
+		t.Fatalf("deleteIDsInBatches failed: %v", err)
 	}
 
-	// Verify total deleted
-	if deleted != 45 {
-		t.Errorf("Expected to delete 45 records total, got %d", deleted)
+	if deleted != 5 {
+		t.Errorf("Expected to delete 5 records total, got %d", deleted)
 	}
 
-	// Verify it stopped after third call (when 0 was returned)
-	if callCount != 3 {
-		t.Errorf("Expected 3 delete calls, got %d", callCount)
+	if queryCount != 3 {
+		t.Errorf("Expected 3 query calls, got %d", queryCount)
 	}
+
+	if deleteCount != 2 {
+		t.Errorf("Expected 2 delete calls, got %d", deleteCount)
+	}
+}
+
+func TestWorker_deleteIDsInBatchesStopsOnContextCancel(t *testing.T) {
+	worker := &Worker{
+		Ent:    nil,
+		Config: Config{CRON: "0 0 * * *", BatchThrottle: time.Nanosecond},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	queryCount := 0
+	queryIDs := func(ctx context.Context, batchSize int) ([]int, error) {
+		queryCount++
+		return []int{1}, nil
+	}
+	deleteIDs := func(ctx context.Context, ids []int) (int, error) {
+		cancel()
+		return len(ids), nil
+	}
+
+	deleted, err := worker.deleteIDsInBatches(ctx, "test_records", queryIDs, deleteIDs)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Expected context.Canceled, got %v", err)
+	}
+
+	if deleted != 1 {
+		t.Errorf("Expected to delete 1 record before cancellation, got %d", deleted)
+	}
+
+	if queryCount != 1 {
+		t.Errorf("Expected 1 query call, got %d", queryCount)
+	}
+}
+
+func TestWorker_cleanupSmallResourcesDeletesByIDBatches(t *testing.T) {
+	originalBatchSize := defaultBatchSize
+	defaultBatchSize = 2
+	defer func() {
+		defaultBatchSize = originalBatchSize
+	}()
+
+	client := enttest.NewEntClient(t, "sqlite3", "file:gc_batch_resources?mode=memory&_fk=0")
+	t.Cleanup(func() { client.Close() })
+
+	worker := &Worker{Ent: client, Config: Config{BatchThrottle: time.Nanosecond}}
+	ctx := context.Background()
+	ctx = ent.NewContext(ctx, client)
+	ctx = authz.WithTestBypass(ctx)
+	ctx = schematype.SkipSoftDelete(ctx)
+
+	oldTime := time.Now().AddDate(0, 0, -3)
+	recentTime := time.Now()
+
+	for i := 0; i < 5; i++ {
+		_, err := client.UsageLog.Create().
+			SetRequestID(1000 + i).
+			SetModelID("test-model").
+			SetCreatedAt(oldTime).
+			Save(ctx)
+		require.NoError(t, err)
+
+		_, err = client.Thread.Create().
+			SetProjectID(1).
+			SetThreadID(fmt.Sprintf("old-thread-%d", i)).
+			SetCreatedAt(oldTime).
+			Save(ctx)
+		require.NoError(t, err)
+
+		_, err = client.Trace.Create().
+			SetProjectID(1).
+			SetTraceID(fmt.Sprintf("old-trace-%d", i)).
+			SetCreatedAt(oldTime).
+			Save(ctx)
+		require.NoError(t, err)
+
+		_, err = client.ChannelProbe.Create().
+			SetChannelID(1).
+			SetTotalRequestCount(1).
+			SetSuccessRequestCount(1).
+			SetTimestamp(oldTime.Unix()).
+			Save(ctx)
+		require.NoError(t, err)
+	}
+
+	_, err := client.UsageLog.Create().
+		SetRequestID(2000).
+		SetModelID("test-model").
+		SetCreatedAt(recentTime).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.Thread.Create().
+		SetProjectID(1).
+		SetThreadID("recent-thread").
+		SetCreatedAt(recentTime).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.Trace.Create().
+		SetProjectID(1).
+		SetTraceID("recent-trace").
+		SetCreatedAt(recentTime).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.ChannelProbe.Create().
+		SetChannelID(1).
+		SetTotalRequestCount(1).
+		SetSuccessRequestCount(1).
+		SetTimestamp(recentTime.Unix()).
+		Save(ctx)
+	require.NoError(t, err)
+
+	require.NoError(t, worker.cleanupUsageLogs(ctx, 1, false))
+	require.NoError(t, worker.cleanupThreads(ctx, 1, false))
+	require.NoError(t, worker.cleanupTraces(ctx, 1, false))
+	require.NoError(t, worker.cleanupChannelProbes(ctx, 1, false))
+
+	usageLogCount, err := client.UsageLog.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, usageLogCount)
+
+	threadCount, err := client.Thread.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, threadCount)
+
+	traceCount, err := client.Trace.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, traceCount)
+
+	channelProbeCount, err := client.ChannelProbe.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, channelProbeCount)
+
+	oldUsageLogCount, err := client.UsageLog.Query().Where(usagelog.CreatedAtLT(time.Now().AddDate(0, 0, -1))).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, oldUsageLogCount)
+
+	oldThreadCount, err := client.Thread.Query().Where(thread.CreatedAtLT(time.Now().AddDate(0, 0, -1))).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, oldThreadCount)
+
+	oldTraceCount, err := client.Trace.Query().Where(trace.CreatedAtLT(time.Now().AddDate(0, 0, -1))).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, oldTraceCount)
+
+	oldChannelProbeCount, err := client.ChannelProbe.Query().Where(channelprobe.TimestampLT(time.Now().AddDate(0, 0, -1).Unix())).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, oldChannelProbeCount)
 }
 
 func TestWorker_cleanupWithZeroDays(t *testing.T) {
