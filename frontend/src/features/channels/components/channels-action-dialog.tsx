@@ -55,6 +55,7 @@ import { Channel, ChannelType, ApiFormat, createChannelInputSchema, updateChanne
 import { ProxyConfig, useOAuthFlow } from '../hooks/use-oauth-flow';
 import { ManualModelBadge } from './manual-model-badge';
 import { CopilotDeviceFlow } from './copilot-device-flow';
+import { CodexDeviceFlow } from './codex-device-flow';
 import { ProxyType } from './channels-proxy-dialog';
 import { useProxyPresets, useSaveProxyPreset } from '@/features/system/data/system';
 import { mergeChannelSettingsForUpdate } from '../utils/merge';
@@ -255,6 +256,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
   const [showGcpJsonData, setShowGcpJsonData] = useState(false);
   const [authMode, setAuthMode] = useState<'official' | 'third-party'>('official');
+  const [codexAuthMethod, setCodexAuthMethod] = useState<'oauth' | 'device'>('oauth');
   const [patternError, setPatternError] = useState<string | null>(null);
   const dialogContentRef = useRef<HTMLDivElement>(null);
 
@@ -385,6 +387,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       codexOAuth.reset();
       claudecodeOAuth.reset();
       antigravityOAuth.reset();
+      setCodexAuthMethod('oauth');
     }
   }, [open, codexOAuth, claudecodeOAuth, antigravityOAuth]);
 
@@ -791,6 +794,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
     if (!isCodexType) {
       codexOAuth.reset();
+      setCodexAuthMethod('oauth');
     }
     if (selectedProvider !== 'claudecode') {
       claudecodeOAuth.reset();
@@ -1740,7 +1744,42 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
 
                             {authMode === 'official' && (
                               <div className='space-y-2'>
-                                {isCodexType && renderOAuthSection(codexOAuth, t('channels.dialogs.fields.apiFormat.codex.description'))}
+                                {isCodexType && (
+                                  <div className='space-y-3'>
+                                    <Tabs
+                                      value={codexAuthMethod}
+                                      onValueChange={(value) => setCodexAuthMethod(value as 'oauth' | 'device')}
+                                      className='w-full'
+                                    >
+                                      <TabsList className='grid w-full grid-cols-2'>
+                                        <TabsTrigger value='oauth'>
+                                          {t('channels.dialogs.codexAuthMethod.oauth')}
+                                        </TabsTrigger>
+                                        <TabsTrigger value='device'>
+                                          {t('channels.dialogs.codexAuthMethod.device')}
+                                        </TabsTrigger>
+                                      </TabsList>
+                                    </Tabs>
+
+                                    {codexAuthMethod === 'oauth' &&
+                                      renderOAuthSection(codexOAuth, t('channels.dialogs.fields.apiFormat.codex.description'))}
+                                    {codexAuthMethod === 'device' && (
+                                      <CodexDeviceFlow
+                                        existingCredentials={form.watch('credentials.apiKey')}
+                                        proxyConfig={proxyConfig}
+                                        onSuccess={(credentials) => {
+                                          form.setValue('credentials.apiKey', credentials, {
+                                            shouldDirty: true,
+                                            shouldValidate: true,
+                                          });
+                                        }}
+                                        onError={(error) => {
+                                          toast.error(error);
+                                        }}
+                                      />
+                                    )}
+                                  </div>
+                                )}
                                 {isClaudeCodeType &&
                                   renderOAuthSection(claudecodeOAuth, t('channels.dialogs.fields.apiFormat.claudecode.description'))}
                               </div>

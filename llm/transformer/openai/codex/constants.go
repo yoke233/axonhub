@@ -19,6 +19,8 @@ func DefaultModels() []string {
 		"gpt-5.3-codex-spark",
 		"gpt-5.4",
 		"gpt-5.4-mini",
+		"gpt-5.5",
+		"codex-auto-review",
 	}
 }
 
@@ -35,4 +37,6 @@ const (
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	RedirectURI = "http://localhost:1455/auth/callback"
 	Scopes      = "openid profile email offline_access"
+
+	ResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 )

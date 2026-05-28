@@ -101,6 +101,8 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 
 		adminGroup.POST("/codex/oauth/start", handlers.Codex.StartOAuth)
 		adminGroup.POST("/codex/oauth/exchange", handlers.Codex.Exchange)
+		adminGroup.POST("/codex/device/start", handlers.Codex.StartDevice)
+		adminGroup.POST("/codex/device/poll", handlers.Codex.PollDevice)
 
 		adminGroup.POST("/claudecode/oauth/start", handlers.ClaudeCode.StartOAuth)
 		adminGroup.POST("/claudecode/oauth/exchange", handlers.ClaudeCode.Exchange)
@@ -183,6 +185,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		openaiGroup := apiGroup.Group("/v1")
 		openaiGroup.POST("/chat/completions", handlers.OpenAI.ChatCompletion)
 		openaiGroup.POST("/responses/compact", handlers.OpenAI.CompactResponse)
+		openaiGroup.GET("/responses", handlers.OpenAI.ResponsesWebsocket)
 		openaiGroup.POST("/responses", handlers.OpenAI.CreateResponse)
 		openaiGroup.GET("/models", handlers.OpenAI.ListModels)
 		openaiGroup.GET("/models/*model", handlers.OpenAI.RetrieveModel)

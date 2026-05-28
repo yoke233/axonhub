@@ -10,13 +10,13 @@ import (
 // DefaultCodexCLIVersion is the codex_cli_rs build_version used in the default User-Agent.
 // Bump when tracking a newer upstream release. The exact value is cosmetic; what matters
 // for fingerprint parity is the prefix "codex_cli_rs/" and the overall format.
-const DefaultCodexCLIVersion = "0.50.0"
+const DefaultCodexCLIVersion = "0.118.0"
 
 // BuildDefaultCodexUserAgent returns a User-Agent string mirroring the format produced by
 // real codex_cli_rs (see codex-rs/login/src/auth/default_client.rs::get_codex_user_agent).
 //
 // Format: "{originator}/{version} ({os_type} {os_version}; {arch}) {terminal_user_agent}"
-// Example: "codex_cli_rs/0.50.0 (Linux 6.0; x86_64) xterm/0.1"
+// Example: "codex_cli_rs/0.118.0 (Linux 6.0; x86_64) xterm/0.1"
 //
 // This is only used as a fallback when the caller did not supply its own User-Agent.
 // Real codex CLI requests already have a proper UA and are passed through unchanged.

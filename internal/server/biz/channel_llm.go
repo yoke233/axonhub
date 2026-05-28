@@ -823,7 +823,7 @@ func (svc *ChannelService) useUTLSForCodex(ch *Channel) {
 		proxyConfig = ch.Settings.Proxy
 	}
 	utlsHTTPClient := codex.NewUTLSHTTPClient(httpclient.ProxyFunc(proxyConfig))
-	ch.HTTPClient = httpclient.NewHttpClientWithClient(utlsHTTPClient)
+	ch.HTTPClient = httpclient.NewHttpClientWithClientAndProxy(utlsHTTPClient, proxyConfig)
 }
 
 // ensureCodexInstallationID returns the channel's persisted codex installation id,

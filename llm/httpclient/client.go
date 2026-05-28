@@ -197,6 +197,24 @@ func NewHttpClientWithClient(client *http.Client) *HttpClient {
 	}
 }
 
+// NewHttpClientWithClientAndProxy creates a new HTTP client with a custom http.Client
+// while preserving the proxy configuration metadata for custom transports.
+func NewHttpClientWithClientAndProxy(client *http.Client, proxyConfig *ProxyConfig) *HttpClient {
+	return &HttpClient{
+		client:      client,
+		proxyConfig: proxyConfig,
+	}
+}
+
+// ProxyFunc returns the proxy resolver used by this client.
+func (hc *HttpClient) ProxyFunc() func(*http.Request) (*url.URL, error) {
+	if hc == nil {
+		return http.ProxyFromEnvironment
+	}
+
+	return getProxyFunc(hc.proxyConfig)
+}
+
 // Do executes the HTTP request.
 func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, error) {
 	slog.DebugContext(ctx, "execute http request", slog.Any("request", request), slog.Any("proxy", hc.proxyConfig))

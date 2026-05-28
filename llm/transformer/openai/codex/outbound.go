@@ -134,6 +134,10 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	// Clone request so we do not mutate upstream pipeline state.
 	reqCopy := *llmReq
+	originalRequestType := reqCopy.RequestType
+	if reqCopy.RequestType == llm.RequestTypeImage {
+		normalizeCodexImageRequest(&reqCopy)
+	}
 
 	// For non-Codex callers we add Codex-compatible defaults. For requests that
 	// already look like real Codex clients, stay in passthrough-first mode.
@@ -188,7 +192,12 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if err != nil {
 		return nil, err
 	}
-	hreq.Body = sanitizeCodexRequestBody(hreq.Body, promptCacheKey != nil)
+	keepPreviousResponseID := reqCopy.RequestType != llm.RequestTypeCompact && reqCopy.PreviousResponseID != nil
+	hreq.Body = sanitizeCodexRequestBody(hreq.Body, promptCacheKey != nil, keepPreviousResponseID)
+	if originalRequestType == llm.RequestTypeImage {
+		hreq.Body = injectCodexImageToolChoice(hreq.Body)
+		hreq.RequestType = string(llm.RequestTypeImage)
+	}
 
 	// Overwrite auth.
 	hreq.Auth = &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken}
@@ -257,7 +266,15 @@ func resolveSessionIDScopeKey(accountIdentity string) string {
 }
 func (t *OutboundTransformer) TransformResponse(ctx context.Context, httpResp *httpclient.Response) (*llm.Response, error) {
 	// Codex upstream returns Responses API response.
-	return t.responsesOutbound.TransformResponse(ctx, httpResp)
+	resp, err := t.responsesOutbound.TransformResponse(ctx, httpResp)
+	if err != nil {
+		return nil, err
+	}
+	if httpResp != nil && httpResp.Request != nil && httpResp.Request.RequestType == string(llm.RequestTypeImage) {
+		convertCodexResponseToImage(resp)
+	}
+
+	return resp, nil
 }
 
 func (t *OutboundTransformer) TransformStream(ctx context.Context, streamIn streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
@@ -327,5 +344,9 @@ func (e *codexExecutor) Do(ctx context.Context, request *httpclient.Request) (*h
 }
 
 func (e *codexExecutor) DoStream(ctx context.Context, request *httpclient.Request) (streams.Stream[*httpclient.StreamEvent], error) {
+	if request != nil && request.RequestType != string(llm.RequestTypeCompact) {
+		return e.doWebsocketStream(ctx, request)
+	}
+
 	return e.inner.DoStream(ctx, request)
 }

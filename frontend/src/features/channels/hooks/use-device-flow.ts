@@ -1,18 +1,40 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
-import {
-  copilotOAuthStart,
-  copilotOAuthPoll,
-  DeviceFlowStartResult,
-  DeviceFlowPollResult,
-} from '../data/copilot';
+import { copilotOAuthStart, copilotOAuthPoll } from '../data/copilot';
+import type { ProxyConfig } from './use-oauth-flow';
+
+export interface DeviceFlowStartResult {
+  session_id: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface DeviceFlowPollResult {
+  access_token?: string;
+  credentials?: string;
+  token_type?: string;
+  scope?: string;
+  status?: string;
+  message?: string;
+}
+
+export interface DeviceFlowPollInput {
+  session_id: string;
+  proxy?: ProxyConfig;
+}
 
 export interface UseDeviceFlowOptions {
   /**
-   * Callback when access token is successfully obtained
+   * Callback when credentials are successfully obtained.
    */
   onSuccess?: (accessToken: string) => void;
+  startFn?: (headers?: Record<string, string>) => Promise<DeviceFlowStartResult>;
+  pollFn?: (input: DeviceFlowPollInput, headers?: Record<string, string>) => Promise<DeviceFlowPollResult>;
+  pollInput?: (sessionId: string) => DeviceFlowPollInput;
+  getCredentials?: (result: DeviceFlowPollResult) => string | undefined;
 }
 
 export interface UseDeviceFlowState {
@@ -62,7 +84,13 @@ export interface UseDeviceFlowActions {
 export function useDeviceFlow(
   options: UseDeviceFlowOptions = {}
 ): UseDeviceFlowState & UseDeviceFlowActions {
-  const { onSuccess } = options;
+  const {
+    onSuccess,
+    startFn = copilotOAuthStart,
+    pollFn = copilotOAuthPoll,
+    pollInput = (sessionId: string) => ({ session_id: sessionId }),
+    getCredentials = (result: DeviceFlowPollResult) => result.credentials || result.access_token,
+  } = options;
   const { t } = useTranslation();
 
   const [userCode, setUserCode] = useState<string | null>(null);
@@ -77,6 +105,10 @@ export function useDeviceFlow(
   const pollingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const currentIntervalRef = useRef<number>(5);
   const onSuccessRef = useRef(onSuccess);
+  const startFnRef = useRef(startFn);
+  const pollFnRef = useRef(pollFn);
+  const pollInputRef = useRef(pollInput);
+  const getCredentialsRef = useRef(getCredentials);
 
   useEffect(() => {
     return () => {
@@ -90,32 +122,12 @@ export function useDeviceFlow(
     onSuccessRef.current = onSuccess;
   }, [onSuccess]);
 
-  const start = useCallback(async () => {
-    if (pollingTimeoutRef.current) {
-      clearTimeout(pollingTimeoutRef.current);
-      pollingTimeoutRef.current = null;
-    }
-
-    setIsPolling(true);
-    setError(null);
-
-    try {
-      const result: DeviceFlowStartResult = await copilotOAuthStart();
-
-      setUserCode(result.user_code);
-      setVerificationUri(result.verification_uri);
-      setSessionId(result.session_id);
-      setExpiresAt(Date.now() + result.expires_in * 1000);
-      setInterval(result.interval);
-      currentIntervalRef.current = result.interval;
-
-      poll(result.session_id, Date.now() + result.expires_in * 1000);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      setError(errorMessage);
-      setIsPolling(false);
-    }
-  }, [t]);
+  useEffect(() => {
+    startFnRef.current = startFn;
+    pollFnRef.current = pollFn;
+    pollInputRef.current = pollInput;
+    getCredentialsRef.current = getCredentials;
+  }, [startFn, pollFn, pollInput, getCredentials]);
 
   const poll = useCallback(
     async (sessionId: string, expiry: number) => {
@@ -126,16 +138,15 @@ export function useDeviceFlow(
       }
 
       try {
-        const result: DeviceFlowPollResult = await copilotOAuthPoll(
-          { session_id: sessionId }
-        );
+        const result: DeviceFlowPollResult = await pollFnRef.current(pollInputRef.current(sessionId));
+        const credentials = getCredentialsRef.current(result);
 
-        if (result.access_token) {
+        if (credentials) {
           setIsPolling(false);
           setIsComplete(true);
 
           if (onSuccessRef.current) {
-            onSuccessRef.current(result.access_token);
+            onSuccessRef.current(credentials);
           }
 
           toast.success(t('channels.dialogs.oauth.messages.credentialsImported'));
@@ -163,8 +174,35 @@ export function useDeviceFlow(
         setError(errorMessage);
       }
     },
-    [t, onSuccessRef]
+    [t]
   );
+
+  const start = useCallback(async () => {
+    if (pollingTimeoutRef.current) {
+      clearTimeout(pollingTimeoutRef.current);
+      pollingTimeoutRef.current = null;
+    }
+
+    setIsPolling(true);
+    setError(null);
+
+    try {
+      const result: DeviceFlowStartResult = await startFnRef.current();
+
+      setUserCode(result.user_code);
+      setVerificationUri(result.verification_uri);
+      setSessionId(result.session_id);
+      setExpiresAt(Date.now() + result.expires_in * 1000);
+      setInterval(result.interval);
+      currentIntervalRef.current = result.interval;
+
+      poll(result.session_id, Date.now() + result.expires_in * 1000);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage);
+      setIsPolling(false);
+    }
+  }, [poll]);
 
   const reset = useCallback(() => {
     if (pollingTimeoutRef.current) {

@@ -9,7 +9,7 @@ import (
 // fallback-only prompt_cache_key values when Codex did not choose one, strips
 // fields the ChatGPT Codex backend rejects, and normalizes instructions so the
 // payload shape stays acceptable.
-func sanitizeCodexRequestBody(body []byte, keepPromptCacheKey bool) []byte {
+func sanitizeCodexRequestBody(body []byte, keepPromptCacheKey bool, keepPreviousResponseID bool) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -18,7 +18,7 @@ func sanitizeCodexRequestBody(body []byte, keepPromptCacheKey bool) []byte {
 		body = deleteCodexPromptCacheKey(body)
 	}
 
-	body = stripCodexUnsupportedFields(body)
+	body = stripCodexUnsupportedFields(body, keepPreviousResponseID)
 
 	return normalizeCodexInstructions(body)
 }
@@ -48,19 +48,22 @@ var codexUnsupportedRequestFields = []string{
 	"safety_identifier",
 	"user",
 	"metadata",
-	"previous_response_id",
 	"background",
 	"prompt_cache_retention",
 	"stream_options",
 }
 
-func stripCodexUnsupportedFields(body []byte) []byte {
+func stripCodexUnsupportedFields(body []byte, keepPreviousResponseID bool) []byte {
 	for _, field := range codexUnsupportedRequestFields {
 		if !gjson.GetBytes(body, field).Exists() {
 			continue
 		}
 
 		body, _ = sjson.DeleteBytes(body, field)
+	}
+
+	if !keepPreviousResponseID && gjson.GetBytes(body, "previous_response_id").Exists() {
+		body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	}
 
 	return body

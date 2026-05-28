@@ -24,6 +24,15 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewBufferString(body)),
+	}
+}
+
 func TestCodexHandlers_StartOAuth_InvalidJSON(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -82,7 +91,116 @@ func TestCodexHandlers_StartOAuth_DoesNotIncludeOriginatorParam(t *testing.T) {
 	require.Equal(t, codex.ClientID, query.Get("client_id"))
 	require.Equal(t, codex.RedirectURI, query.Get("redirect_uri"))
 	require.Equal(t, "true", query.Get("codex_cli_simplified_flow"))
+	require.Equal(t, "login", query.Get("prompt"))
 	require.Equal(t, resp.SessionID, query.Get("state"))
+}
+
+func TestCodexHandlers_DeviceFlow_Pending(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case codexDeviceUserCodeURL:
+			return jsonResponse(http.StatusOK, `{"device_auth_id":"dev-1","user_code":"ABCD-EFGH","interval":2}`), nil
+		case codexDeviceTokenURL:
+			return jsonResponse(http.StatusForbidden, `{"error":"authorization_pending"}`), nil
+		default:
+			return http.DefaultTransport.RoundTrip(req)
+		}
+	})
+
+	h := NewCodexHandlers(CodexHandlersParams{
+		CacheConfig: xcache.Config{Mode: xcache.ModeMemory},
+		HttpClient:  httpclient.NewHttpClientWithClient(&http.Client{Transport: transport}),
+	})
+
+	router := gin.New()
+	router.POST("/admin/codex/device/start", h.StartDevice)
+	router.POST("/admin/codex/device/poll", h.PollDevice)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/codex/device/start", nil)
+	startReq.Header.Set("Content-Type", "application/json")
+	startW := httptest.NewRecorder()
+	router.ServeHTTP(startW, startReq)
+	require.Equal(t, http.StatusOK, startW.Code)
+
+	var startResp StartCodexDeviceResponse
+	require.NoError(t, json.Unmarshal(startW.Body.Bytes(), &startResp))
+	require.NotEmpty(t, startResp.SessionID)
+	require.Equal(t, "ABCD-EFGH", startResp.UserCode)
+	require.Equal(t, codexDeviceVerificationURL, startResp.VerificationURI)
+	require.Equal(t, 2, startResp.Interval)
+
+	pollBody, err := json.Marshal(PollCodexDeviceRequest{SessionID: startResp.SessionID})
+	require.NoError(t, err)
+	pollReq := httptest.NewRequest(http.MethodPost, "/admin/codex/device/poll", bytes.NewBuffer(pollBody))
+	pollReq.Header.Set("Content-Type", "application/json")
+	pollW := httptest.NewRecorder()
+	router.ServeHTTP(pollW, pollReq)
+	require.Equal(t, http.StatusAccepted, pollW.Code)
+	require.Contains(t, pollW.Body.String(), `"pending"`)
+}
+
+func TestCodexHandlers_DeviceFlow_Success(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var tokenExchangeBody []byte
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.String() {
+		case codexDeviceUserCodeURL:
+			return jsonResponse(http.StatusOK, `{"device_auth_id":"dev-1","usercode":"WXYZ-1234","interval":"3"}`), nil
+		case codexDeviceTokenURL:
+			return jsonResponse(http.StatusOK, `{"authorization_code":"auth-code","code_verifier":"verifier","code_challenge":"challenge"}`), nil
+		case codex.TokenURL:
+			var err error
+			tokenExchangeBody, err = io.ReadAll(req.Body)
+			require.NoError(t, err)
+			_ = req.Body.Close()
+			return jsonResponse(http.StatusOK, `{"access_token":"access","refresh_token":"refresh","id_token":"id","expires_in":3600,"token_type":"bearer","scope":"openid email"}`), nil
+		default:
+			return http.DefaultTransport.RoundTrip(req)
+		}
+	})
+
+	h := NewCodexHandlers(CodexHandlersParams{
+		CacheConfig: xcache.Config{Mode: xcache.ModeMemory},
+		HttpClient:  httpclient.NewHttpClientWithClient(&http.Client{Transport: transport}),
+	})
+
+	router := gin.New()
+	router.POST("/admin/codex/device/start", h.StartDevice)
+	router.POST("/admin/codex/device/poll", h.PollDevice)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/admin/codex/device/start", nil)
+	startReq.Header.Set("Content-Type", "application/json")
+	startW := httptest.NewRecorder()
+	router.ServeHTTP(startW, startReq)
+	require.Equal(t, http.StatusOK, startW.Code)
+
+	var startResp StartCodexDeviceResponse
+	require.NoError(t, json.Unmarshal(startW.Body.Bytes(), &startResp))
+	require.Equal(t, "WXYZ-1234", startResp.UserCode)
+	require.Equal(t, 3, startResp.Interval)
+
+	pollBody, err := json.Marshal(PollCodexDeviceRequest{SessionID: startResp.SessionID})
+	require.NoError(t, err)
+	pollReq := httptest.NewRequest(http.MethodPost, "/admin/codex/device/poll", bytes.NewBuffer(pollBody))
+	pollReq.Header.Set("Content-Type", "application/json")
+	pollW := httptest.NewRecorder()
+	router.ServeHTTP(pollW, pollReq)
+	require.Equal(t, http.StatusOK, pollW.Code)
+
+	form, err := url.ParseQuery(string(tokenExchangeBody))
+	require.NoError(t, err)
+	require.Equal(t, "auth-code", form.Get("code"))
+	require.Equal(t, "verifier", form.Get("code_verifier"))
+	require.Equal(t, codexDeviceTokenExchangeRedirectURI, form.Get("redirect_uri"))
+
+	var pollResp PollCodexDeviceResponse
+	require.NoError(t, json.Unmarshal(pollW.Body.Bytes(), &pollResp))
+	require.Equal(t, "success", pollResp.Status)
+	require.Contains(t, pollResp.Credentials, `"access_token":"access"`)
+	require.Contains(t, pollResp.Credentials, `"refresh_token":"refresh"`)
 }
 
 func TestCodexHandlers_Exchange_StateDeletedOnTokenExchangeFailure(t *testing.T) {

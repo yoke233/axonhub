@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +170,22 @@ func (m *mockCodexExecutor) DoStream(_ context.Context, _ *httpclient.Request) (
 	return streams.SliceStream(m.streamEvents), nil
 }
 
+type codexProxyExecutor struct {
+	proxy func(*http.Request) (*url.URL, error)
+}
+
+func (m *codexProxyExecutor) Do(_ context.Context, _ *httpclient.Request) (*httpclient.Response, error) {
+	return nil, assert.AnError
+}
+
+func (m *codexProxyExecutor) DoStream(_ context.Context, _ *httpclient.Request) (streams.Stream[*httpclient.StreamEvent], error) {
+	return nil, assert.AnError
+}
+
+func (m *codexProxyExecutor) ProxyFunc() func(*http.Request) (*url.URL, error) {
+	return m.proxy
+}
+
 type eagerRefreshTokenGetter struct {
 	creds             *oauth.OAuthCredentials
 	ensureCalls       int
@@ -279,7 +296,7 @@ func TestCodexOutbound_StripsBodyFieldsCodexBackendRejects(t *testing.T) {
 	assert.Equal(t, "Keep-Alive", hreq.Headers.Get("Connection"))
 	assert.NotContains(t, body, "prompt_cache_retention")
 	assert.NotContains(t, body, "safety_identifier")
-	assert.NotContains(t, body, "previous_response_id")
+	assert.Equal(t, previousResponseID, body["previous_response_id"])
 	assert.NotContains(t, body, "stream_options")
 }
 
@@ -484,6 +501,97 @@ func TestCodexOutbound_CodexCallerDoesNotInjectOptionalCodexParametersWhenMissin
 	assert.False(t, hasStore)
 	assert.False(t, hasPromptCacheKey)
 	assert.Empty(t, hreq.Headers.Get(SessionHeader))
+}
+
+func TestCodexOutbound_ImageRequestUsesHostedTool(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+
+	hreq, err := outbound.TransformRequest(ctx, &llm.Request{
+		RequestType: llm.RequestTypeImage,
+		Model:       "gpt-5-codex",
+		Image: &llm.ImageRequest{
+			Prompt:       "Draw a terminal UI",
+			Size:         "1024x1024",
+			Quality:      "high",
+			OutputFormat: "png",
+		},
+	})
+	require.NoError(t, err)
+
+	body := decodeCodexRequestBody(t, hreq)
+	require.Equal(t, string(llm.RequestTypeImage), hreq.RequestType)
+	assert.Equal(t, true, body["stream"])
+	assert.Equal(t, map[string]any{"type": llm.ToolTypeImageGeneration}, body["tool_choice"])
+
+	tools, ok := body["tools"].([]any)
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	tool, ok := tools[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, llm.ToolTypeImageGeneration, tool["type"])
+	assert.Equal(t, "1024x1024", tool["size"])
+	assert.Equal(t, "high", tool["quality"])
+	assert.Equal(t, "png", tool["output_format"])
+}
+
+func TestCodexOutbound_ImageResponseMapsToImageResult(t *testing.T) {
+	ctx := context.Background()
+	outbound := newTestCodexOutbound(t)
+
+	resp, err := outbound.TransformResponse(ctx, &httpclient.Response{
+		StatusCode: http.StatusOK,
+		Request: &httpclient.Request{
+			RequestType: string(llm.RequestTypeImage),
+		},
+		Body: []byte(`{
+			"id": "resp_image",
+			"object": "response",
+			"created_at": 1700000000,
+			"status": "completed",
+			"model": "gpt-5-codex",
+			"output": [
+				{
+					"id": "img_1",
+					"type": "image_generation_call",
+					"status": "completed",
+					"result": "aW1hZ2U="
+				}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp.Image)
+	require.Len(t, resp.Image.Data, 1)
+	assert.Equal(t, "aW1hZ2U=", resp.Image.Data[0].B64JSON)
+}
+
+func TestCodexWebsocketAuthAppliesBearer(t *testing.T) {
+	headers := http.Header{}
+
+	err := applyCodexWebsocketAuth(headers, &httpclient.AuthConfig{
+		Type:   httpclient.AuthTypeBearer,
+		APIKey: "access-token",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer access-token", headers.Get("Authorization"))
+}
+
+func TestCodexWebsocketUsesExecutorProxyFunc(t *testing.T) {
+	proxyURL, err := url.Parse("http://proxy.local:8080")
+	require.NoError(t, err)
+
+	executor := &codexProxyExecutor{
+		proxy: func(*http.Request) (*url.URL, error) {
+			return proxyURL, nil
+		},
+	}
+
+	wrapped := (&codexExecutor{inner: executor}).websocketProxyFunc()
+	resolved, err := wrapped(&http.Request{})
+	require.NoError(t, err)
+	require.Equal(t, proxyURL, resolved)
 }
 
 func newTestCodexOutbound(t *testing.T) *OutboundTransformer {
