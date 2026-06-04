@@ -21,6 +21,7 @@ import (
 	"github.com/looplj/axonhub/llm/pipeline"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer/openai"
+	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 )
 
 func TestCodexOutbound_StreamAcceptHeader(t *testing.T) {
@@ -30,6 +31,7 @@ func TestCodexOutbound_StreamAcceptHeader(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedHeaders <- r.Header.Clone()
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {}\n\n"))
 	}))
@@ -51,6 +53,7 @@ func TestCodexOutbound_StreamAcceptHeader(t *testing.T) {
 
 	stream, err := executor.DoStream(ctx, request)
 	require.NoError(t, err)
+
 	defer func() {
 		_ = stream.Close()
 	}()
@@ -77,6 +80,7 @@ func TestCodexOutbound_StreamAllowsDownstreamIdentityOverrides(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedHeaders <- r.Header.Clone()
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {}\n\n"))
 	}))
@@ -98,6 +102,7 @@ func TestCodexOutbound_StreamAllowsDownstreamIdentityOverrides(t *testing.T) {
 
 	stream, err := executor.DoStream(ctx, request)
 	require.NoError(t, err)
+
 	defer func() {
 		_ = stream.Close()
 	}()
@@ -114,6 +119,37 @@ func TestCodexOutbound_StreamAllowsDownstreamIdentityOverrides(t *testing.T) {
 	assert.Contains(t, strings.ToLower(headers.Get("User-Agent")), legacyCodexOriginator())
 	assert.Equal(t, testChatAccountID, headers.Get("Chatgpt-Account-Id"))
 	assert.Equal(t, "Bearer "+accessToken, headers.Get("Authorization"))
+}
+
+func TestCodexOutbound_CustomizeExecutorUsesCurrentExecutor(t *testing.T) {
+	outbound, err := NewOutboundTransformer(Params{
+		BaseURL:       "wss://chatgpt.com/backend-api/codex#",
+		Transport:     responses.TransportWebSocket,
+		TokenProvider: staticTokenGetter{creds: &oauth.OAuthCredentials{AccessToken: testAccessTokenWithAccountID(t), ExpiresAt: time.Now().Add(time.Hour)}},
+	})
+	require.NoError(t, err)
+
+	firstClient := httpclient.NewHttpClientWithProxy(&httpclient.ProxyConfig{Type: httpclient.ProxyTypeDisabled})
+	secondClient := httpclient.NewHttpClientWithProxy(&httpclient.ProxyConfig{Type: httpclient.ProxyTypeURL, URL: "http://127.0.0.1:18081"})
+
+	first, ok := outbound.CustomizeExecutor(firstClient).(*codexExecutor)
+	require.True(t, ok)
+	firstInner, ok := first.inner.(*responses.WebSocketExecutor)
+	require.True(t, ok)
+
+	second, ok := outbound.CustomizeExecutor(secondClient).(*codexExecutor)
+	require.True(t, ok)
+	secondInner, ok := second.inner.(*responses.WebSocketExecutor)
+	require.True(t, ok)
+	again, ok := outbound.CustomizeExecutor(firstClient).(*codexExecutor)
+	require.True(t, ok)
+	againInner, ok := again.inner.(*responses.WebSocketExecutor)
+	require.True(t, ok)
+
+	require.NotSame(t, firstInner, secondInner)
+	require.Same(t, firstInner, againInner)
+	require.Same(t, firstClient, firstInner.Inner())
+	require.Same(t, secondClient, secondInner.Inner())
 }
 
 func TestCodexOutbound_CustomizeExecutorAggregatesNonStreamRequests(t *testing.T) {
@@ -154,6 +190,33 @@ func TestCodexOutbound_CustomizeExecutorAggregatesNonStreamRequests(t *testing.T
 	assert.Equal(t, "resp_test_123", body["id"])
 	assert.Equal(t, "completed", body["status"])
 	assert.Equal(t, "gpt-5-codex", body["model"])
+}
+
+func TestCodexOutbound_DoReturnsWebSocketErrorEvents(t *testing.T) {
+	ctx := context.Background()
+	accessToken := testAccessTokenWithAccountID(t)
+
+	outbound, err := NewOutboundTransformer(Params{
+		BaseURL: "https://chatgpt.com/backend-api/codex#",
+		TokenProvider: staticTokenGetter{
+			creds: &oauth.OAuthCredentials{
+				AccessToken: accessToken,
+				ExpiresAt:   time.Now().Add(time.Hour),
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	request := buildCodexStreamRequest(t, ctx, outbound, false)
+	executor := outbound.CustomizeExecutor(&mockCodexExecutor{
+		streamEvents: []*httpclient.StreamEvent{
+			{Type: "error", Data: []byte(`{"type":"error","code":"bad_request","message":"invalid websocket request"}`)},
+		},
+	})
+
+	response, err := executor.Do(ctx, request)
+	require.Nil(t, response)
+	require.ErrorContains(t, err, "bad_request: invalid websocket request")
 }
 
 var _ pipeline.ChannelCustomizedExecutor = (*OutboundTransformer)(nil)
@@ -458,12 +521,12 @@ func TestCodexOutbound_ForcesArrayInputsForSingleMessage(t *testing.T) {
 	// The "input" field must be an array of items, not a plain string.
 	inputRaw, ok := body["input"]
 	require.True(t, ok, "input field must be present")
-	inputSlice, ok := inputRaw.([]interface{})
+	inputSlice, ok := inputRaw.([]any)
 	require.True(t, ok, "input should be an array, got %T", inputRaw)
 	assert.NotEmpty(t, inputSlice)
 
 	// Verify the single item has the expected message structure.
-	first, ok := inputSlice[0].(map[string]interface{})
+	first, ok := inputSlice[0].(map[string]any)
 	require.True(t, ok, "first input item should be a map, got %T", inputSlice[0])
 	assert.Equal(t, "message", first["type"])
 	assert.Equal(t, "user", first["role"])
@@ -644,6 +707,7 @@ func buildCodexStreamRequest(t *testing.T, ctx context.Context, outbound *Outbou
 	rawReq.Header.Set("Openai-Beta", "responses=experimental")
 	rawReq.Header.Set("Session_id", "provided-session")
 	rawReq.Header.Set("Version", "9.9.9")
+
 	if withInboundIdentity {
 		rawReq.Header.Set("Originator", legacyCodexOriginator())
 		rawReq.Header.Set("User-Agent", legacyCodexUserAgent())
@@ -655,6 +719,7 @@ func buildCodexStreamRequest(t *testing.T, ctx context.Context, outbound *Outbou
 
 	llmReq, err := inbound.TransformRequest(ctx, inboundRequest)
 	require.NoError(t, err)
+
 	llmReq.RawRequest = inboundRequest
 
 	outboundRequest, err := outbound.TransformRequest(ctx, llmReq)

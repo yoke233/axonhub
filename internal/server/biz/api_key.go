@@ -42,6 +42,7 @@ type APIKeyServiceParams struct {
 	CacheConfig    xcache.Config
 	Ent            *ent.Client
 	ProjectService *ProjectService
+	KeyPrefix      string `name:"api_key_prefix"`
 }
 
 type APIKeyService struct {
@@ -50,6 +51,7 @@ type APIKeyService struct {
 	ProjectService *ProjectService
 	APIKeyCache    *live.IndexedCache[string, *ent.APIKey]
 	apiKeyNotifier watcher.Notifier[live.CacheEvent[string]]
+	keyPrefix      string
 }
 
 func NewAPIKeyService(params APIKeyServiceParams) *APIKeyService {
@@ -58,6 +60,7 @@ func NewAPIKeyService(params APIKeyServiceParams) *APIKeyService {
 			db: params.Ent,
 		},
 		ProjectService: params.ProjectService,
+		keyPrefix:      params.KeyPrefix,
 	}
 
 	cacheMode := params.CacheConfig.Mode
@@ -158,8 +161,12 @@ func (s *APIKeyService) loadAPIKeysSince(ctx context.Context, since time.Time) (
 	return items, maxUpdated, nil
 }
 
-// GenerateAPIKey generates a new API key with ah- prefix (similar to OpenAI format).
-func GenerateAPIKey() (string, error) {
+// GenerateAPIKey generates a new API key with the given prefix.
+func GenerateAPIKey(prefix string) (string, error) {
+	if strings.TrimSpace(prefix) == "" {
+		return "", fmt.Errorf("api key prefix must not be empty")
+	}
+
 	// Generate 32 bytes of random data
 	bytes := make([]byte, 32)
 
@@ -168,8 +175,8 @@ func GenerateAPIKey() (string, error) {
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 
-	// Convert to hex and add ah- prefix
-	return "ah-" + hex.EncodeToString(bytes), nil
+	// Convert to hex and add prefix
+	return prefix + "-" + hex.EncodeToString(bytes), nil
 }
 
 // CreateLLMAPIKey creates a new API key for LLM calls using a service account API key.
@@ -181,7 +188,7 @@ func (s *APIKeyService) CreateLLMAPIKey(ctx context.Context, owner *ent.APIKey, 
 
 	client := s.entFromContext(ctx)
 
-	generatedKey, err := GenerateAPIKey()
+	generatedKey, err := GenerateAPIKey(s.keyPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)
 	}
@@ -229,8 +236,8 @@ func (s *APIKeyService) CreateAPIKey(ctx context.Context, input ent.CreateAPIKey
 		return nil, xerrors.DuplicateNameError("API Key", input.Name)
 	}
 
-	// Generate API key with ah- prefix (similar to OpenAI format)
-	generatedKey, err := GenerateAPIKey()
+	// Generate API key with configured prefix
+	generatedKey, err := GenerateAPIKey(s.keyPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate API key: %w", err)
 	}
@@ -627,6 +634,42 @@ func (s *APIKeyService) BulkEnableAPIKeys(ctx context.Context, ids []int) error 
 // BulkArchiveAPIKeys archives multiple API keys by their IDs.
 func (s *APIKeyService) BulkArchiveAPIKeys(ctx context.Context, ids []int) error {
 	return s.bulkUpdateAPIKeyStatus(ctx, ids, apikey.StatusArchived, "archive")
+}
+
+// RotateAPIKey rotates an API key by generating a new key value while preserving all other properties.
+// This is useful when a key is compromised or when an employee leaves, without losing usage statistics.
+func (s *APIKeyService) RotateAPIKey(ctx context.Context, id int) (*ent.APIKey, error) {
+	// Get the existing API key
+	existing, err := s.db.APIKey.Get(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get API key: %w", err)
+	}
+
+	// Cannot rotate noauth type API key
+	if existing.Type == apikey.TypeNoauth {
+		return nil, fmt.Errorf("noauth type API key cannot be rotated")
+	}
+
+	// Generate a new API key
+	newKey, err := GenerateAPIKey(s.keyPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate new API key: %w", err)
+	}
+
+	oldKey := existing.Key
+
+	// Update the key field directly using Ent
+	rotated, err := s.db.APIKey.UpdateOneID(id).
+		SetKey(newKey).
+		Save(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to rotate API key: %w", err)
+	}
+
+	// Invalidate caches for both old and new keys
+	s.invalidateAPIKeyCaches(ctx, oldKey, newKey)
+
+	return rotated, nil
 }
 
 func (s *APIKeyService) EnsureNoAuthAPIKey(ctx context.Context) (*ent.APIKey, error) {

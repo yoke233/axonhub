@@ -130,11 +130,14 @@ dumps
 .gocache
 
 config.yml
-internal/server/static/dist
+internal/server/static/dist/*
+!internal/server/static/dist/.gitkeep
 *.b64
 coverage.out
 *.test
 *.backup
+
+.playwright-cli/
 
 # E2E testing artifacts
 scripts/e2e/.e2e-backend.pid
@@ -161,3 +164,5 @@ config.schema.json
 *.agent/summary
 .factory
 .harness/
+.omo/
+.playwright-mcp/

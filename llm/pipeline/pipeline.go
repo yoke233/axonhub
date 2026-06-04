@@ -107,12 +107,12 @@ func (f *Factory) Pipeline(
 
 // pipeline implements the main pipeline logic with retry capabilities.
 type pipeline struct {
-	Executor              Executor
-	Inbound               transformer.Inbound
-	Outbound              transformer.Outbound
-	middlewares           []Middleware
-	maxChannelRetries     int
-	maxSameChannelRetries int
+	Executor               Executor
+	Inbound                transformer.Inbound
+	Outbound               transformer.Outbound
+	middlewares            []Middleware
+	maxChannelRetries      int
+	maxSameChannelRetries  int
 	retryDelay             time.Duration
 	emptyResponseDetection bool
 }
@@ -250,13 +250,16 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 		return nil, err
 	}
 
+	// Make the original raw request available before request middlewares run.
+	llmRequest.RawRequest = request
+
 	// Step 2: Apply before request middlewares
 	llmRequest, err = p.applyBeforeRequestMiddlewares(ctx, llmRequest)
 	if err != nil {
 		return nil, err
 	}
 
-	llmRequest.RawRequest = request
+	originalStream := llmRequest.Stream
 
 	var lastErr error
 
@@ -265,6 +268,8 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 
 	// Step 3: Process the request
 	for {
+		llmRequest.Stream = originalStream
+
 		result, err := p.processRequest(ctx, llmRequest)
 		if err == nil {
 			return result, nil
@@ -338,6 +343,8 @@ func (p *pipeline) Process(ctx context.Context, request *httpclient.Request) (*R
 }
 
 func (p *pipeline) processRequest(ctx context.Context, request *llm.Request) (*Result, error) {
+	originalWantStream := request.Stream != nil && *request.Stream
+
 	httpReq, err := p.Outbound.TransformRequest(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform request: %w", err)
@@ -353,6 +360,8 @@ func (p *pipeline) processRequest(ctx context.Context, request *llm.Request) (*R
 	// Apply raw request middlewares
 	httpReq, err = p.applyRawRequestMiddlewares(ctx, httpReq)
 	if err != nil {
+		p.applyRawErrorResponseMiddlewares(ctx, err)
+
 		return nil, fmt.Errorf("failed to apply raw request middlewares: %w", err)
 	}
 
@@ -361,8 +370,11 @@ func (p *pipeline) processRequest(ctx context.Context, request *llm.Request) (*R
 		executor = c.CustomizeExecutor(executor)
 	}
 
+	effectiveWantStream := request.Stream != nil && *request.Stream
+
 	var result *Result
-	if request.Stream != nil && *request.Stream {
+	switch {
+	case originalWantStream:
 		result = &Result{
 			Stream: true,
 		}
@@ -373,7 +385,18 @@ func (p *pipeline) processRequest(ctx context.Context, request *llm.Request) (*R
 		}
 
 		result.EventStream = stream
-	} else {
+	case effectiveWantStream:
+		result = &Result{
+			Stream: false,
+		}
+
+		response, err := p.autoAggregateStream(ctx, executor, httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to auto-aggregate streaming response: %w", err)
+		}
+
+		result.Response = response
+	default:
 		result = &Result{
 			Stream: false,
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/scopes"
 	"github.com/looplj/axonhub/internal/server/biz"
+	"github.com/looplj/axonhub/internal/server/gc"
 	"github.com/samber/lo"
 )
 
@@ -32,6 +33,13 @@ func (r *mutationResolver) UpdateBrandSettings(ctx context.Context, input Update
 		err := r.systemService.SetBrandLogo(ctx, *input.BrandLogo)
 		if err != nil {
 			return false, fmt.Errorf("failed to update brand logo setting: %w", err)
+		}
+	}
+
+	if input.Title != nil {
+		err := r.systemService.SetTitle(ctx, *input.Title)
+		if err != nil {
+			return false, fmt.Errorf("failed to update title setting: %w", err)
 		}
 	}
 
@@ -70,6 +78,19 @@ func (r *mutationResolver) UpdateWebhookNotifierConfig(ctx context.Context, inpu
 
 // UpdateSystemModelSettings is the resolver for the updateSystemModelSettings field.
 func (r *mutationResolver) UpdateSystemModelSettings(ctx context.Context, input biz.SystemModelSettings) (bool, error) {
+	// Older clients may update the model toggles without sending developer rules.
+	// Preserve them unless the caller explicitly sends an empty list.
+	// This still follows the existing last-writer-wins behavior for concurrent
+	// full settings updates; callers editing developer rules should send the
+	// complete developerSettings list.
+	if input.DeveloperSettings == nil {
+		current, err := r.systemService.ModelSettings(ctx)
+		if err != nil {
+			return false, fmt.Errorf("failed to get current system model settings: %w", err)
+		}
+		input.DeveloperSettings = current.DeveloperSettings
+	}
+
 	err := r.systemService.SetModelSettings(ctx, input)
 	if err != nil {
 		return false, fmt.Errorf("failed to update system model settings: %w", err)
@@ -143,6 +164,8 @@ func (r *mutationResolver) UpdateSystemGeneralSettings(ctx context.Context, inpu
 		return false, fmt.Errorf("failed to update general settings: %w", err)
 	}
 
+	r.backupService.Reschedule(ctx, r.scheduler)
+
 	return true, nil
 }
 
@@ -151,6 +174,56 @@ func (r *mutationResolver) UpdateVideoStorageSettings(ctx context.Context, input
 	err := r.systemService.SetVideoStorageSettings(ctx, input)
 	if err != nil {
 		return false, fmt.Errorf("failed to update video storage settings: %w", err)
+	}
+
+	r.videoWorker.Reschedule(ctx, r.scheduler)
+
+	return true, nil
+}
+
+// UpdateQuotaEnforcementSettings is the resolver for the updateQuotaEnforcementSettings field.
+func (r *mutationResolver) UpdateQuotaEnforcementSettings(ctx context.Context, input UpdateQuotaEnforcementSettingsInput) (bool, error) {
+	current, err := r.systemService.QuotaEnforcementSettings(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read current quota enforcement settings: %w", err)
+	}
+	newSettings := biz.QuotaEnforcementSettings{
+		Enabled: current.Enabled,
+		Mode:    current.Mode,
+	}
+	if input.Enabled != nil {
+		newSettings.Enabled = *input.Enabled
+	}
+	if input.Mode != nil {
+		newSettings.Mode = *input.Mode
+	}
+
+	err = r.systemService.SetQuotaEnforcementSettings(ctx, newSettings)
+	if err != nil {
+		return false, fmt.Errorf("failed to update quota enforcement settings: %w", err)
+	}
+
+	return true, nil
+}
+
+// UpdateSecuritySettings is the resolver for the updateSecuritySettings field.
+func (r *mutationResolver) UpdateSecuritySettings(ctx context.Context, input UpdateSecuritySettingsInput) (bool, error) {
+	current, err := r.systemService.SecuritySettings(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read current security settings: %w", err)
+	}
+
+	newSettings := biz.SecuritySettings{
+		BlockedIPs: current.BlockedIPs,
+	}
+
+	if input.BlockedIPs != nil {
+		newSettings.BlockedIPs = input.BlockedIPs
+	}
+
+	err = r.systemService.SetSecuritySettings(ctx, newSettings)
+	if err != nil {
+		return false, fmt.Errorf("failed to update security settings: %w", err)
 	}
 
 	return true, nil
@@ -168,7 +241,7 @@ func (r *mutationResolver) CheckProviderQuotas(ctx context.Context) (bool, error
 }
 
 // TriggerGcCleanup is the resolver for the triggerGcCleanup field.
-func (r *mutationResolver) TriggerGcCleanup(ctx context.Context) (bool, error) {
+func (r *mutationResolver) TriggerGcCleanup(ctx context.Context, input gc.TriggerGcCleanupInput) (bool, error) {
 	if !scopes.UserHasScope(ctx, scopes.ScopeWriteSettings) {
 		return false, fmt.Errorf("permission denied: requires write:settings scope")
 	}
@@ -183,7 +256,7 @@ func (r *mutationResolver) TriggerGcCleanup(ctx context.Context) (bool, error) {
 
 		// Use a detached context with system bypass for background execution
 		bgCtx := authz.WithSystemBypass(context.WithoutCancel(ctx), "manual-gc-cleanup")
-		_ = r.gcWorker.RunCleanupNow(bgCtx)
+		_ = r.gcWorker.RunCleanupNow(bgCtx, input)
 	}()
 
 	return true, nil
@@ -219,6 +292,16 @@ func (r *mutationResolver) UpdateUserAgentPassThroughSettings(ctx context.Contex
 	return true, nil
 }
 
+// UpdatePassThroughSettings is the resolver for the updatePassThroughSettings field.
+func (r *mutationResolver) UpdatePassThroughSettings(ctx context.Context, input UpdatePassThroughSettingsInput) (bool, error) {
+	err := r.systemService.SetPassThrough(ctx, input.Enabled)
+	if err != nil {
+		return false, fmt.Errorf("failed to update pass-through settings: %w", err)
+	}
+
+	return true, nil
+}
+
 // ClearCache is the resolver for the clearCache field.
 func (r *mutationResolver) ClearCache(ctx context.Context, input ClearCacheInput) (*ClearCachePayload, error) {
 	user, ok := contexts.GetUser(ctx)
@@ -246,6 +329,24 @@ func (r *mutationResolver) ClearCache(ctx context.Context, input ClearCacheInput
 	}, nil
 }
 
+// PreviewGcCleanup is the resolver for the previewGcCleanup field.
+func (r *queryResolver) PreviewGcCleanup(ctx context.Context, input gc.TriggerGcCleanupInput) ([]*gc.GcCleanupPreviewItem, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeReadSettings) {
+		return nil, fmt.Errorf("permission denied: requires read:settings scope")
+	}
+
+	items, err := r.gcWorker.PreviewCleanup(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]*gc.GcCleanupPreviewItem, len(items))
+	for i := range items {
+		result[i] = &items[i]
+	}
+	return result, nil
+}
+
 // SystemStatus is the resolver for the systemStatus field.
 func (r *queryResolver) SystemStatus(ctx context.Context) (*SystemStatus, error) {
 	isInitialized, err := r.systemService.IsInitialized(ctx)
@@ -270,9 +371,15 @@ func (r *queryResolver) BrandSettings(ctx context.Context) (*BrandSettings, erro
 		return nil, fmt.Errorf("failed to get brand logo: %w", err)
 	}
 
+	title, err := r.systemService.Title(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get title: %w", err)
+	}
+
 	return &BrandSettings{
 		BrandName: &brandName,
 		BrandLogo: &brandLogo,
+		Title:     &title,
 	}, nil
 }
 
@@ -391,6 +498,16 @@ func (r *queryResolver) VideoStorageSettings(ctx context.Context) (*biz.VideoSto
 	return r.systemService.VideoStorageSettings(ctx)
 }
 
+// QuotaEnforcementSettings is the resolver for the quotaEnforcementSettings field.
+func (r *queryResolver) QuotaEnforcementSettings(ctx context.Context) (*biz.QuotaEnforcementSettings, error) {
+	return r.systemService.QuotaEnforcementSettings(ctx)
+}
+
+// SecuritySettings is the resolver for the securitySettings field.
+func (r *queryResolver) SecuritySettings(ctx context.Context) (*biz.SecuritySettings, error) {
+	return r.systemService.SecuritySettings(ctx)
+}
+
 // ProxyPresets is the resolver for the proxyPresets field.
 func (r *queryResolver) ProxyPresets(ctx context.Context) ([]*biz.ProxyPreset, error) {
 	presets, err := r.systemService.ProxyPresets(ctx)
@@ -409,6 +526,18 @@ func (r *queryResolver) UserAgentPassThroughSettings(ctx context.Context) (*User
 	}
 
 	return &UserAgentPassThroughSettings{
+		Enabled: enabled,
+	}, nil
+}
+
+// PassThroughSettings is the resolver for the passThroughSettings field.
+func (r *queryResolver) PassThroughSettings(ctx context.Context) (*PassThroughSettings, error) {
+	enabled, err := r.systemService.PassThrough(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pass-through settings: %w", err)
+	}
+
+	return &PassThroughSettings{
 		Enabled: enabled,
 	}, nil
 }

@@ -44,6 +44,10 @@ type Config struct {
 	// AnthropicPromptCacheTraceEnabled enables deriving trace IDs from Anthropic prompt cache keys.
 	// Default to false.
 	AnthropicPromptCacheTraceEnabled bool `conf:"anthropic_prompt_cache_trace_enabled" yaml:"anthropic_prompt_cache_trace_enabled" json:"anthropic_prompt_cache_trace_enabled"`
+
+	// OpenCodeTraceEnabled enables extracting trace IDs from OpenCode request headers.
+	// Default to false.
+	OpenCodeTraceEnabled bool `conf:"opencode_trace_enabled" yaml:"opencode_trace_enabled" json:"opencode_trace_enabled"`
 }
 
 // GenerateTraceID generate trace id, format as at-{{uuid}}.

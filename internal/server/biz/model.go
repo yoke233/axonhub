@@ -18,6 +18,7 @@ import (
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xerrors"
 	"github.com/looplj/axonhub/internal/pkg/xregexp"
+	"github.com/looplj/axonhub/internal/pkg/xtime"
 	"github.com/looplj/axonhub/internal/scopes"
 )
 
@@ -48,11 +49,19 @@ type ModelService struct {
 
 // validateModelSettings validates regex patterns in model settings.
 func (svc *ModelService) validateModelSettings(settings *objects.ModelSettings) error {
+	return validateModelSettings(settings)
+}
+
+func validateModelSettings(settings *objects.ModelSettings) error {
 	if settings == nil || len(settings.Associations) == 0 {
 		return nil
 	}
 
 	for _, assoc := range settings.Associations {
+		if assoc == nil {
+			continue
+		}
+
 		if err := validateModelAssociationWhen(assoc.When); err != nil {
 			return fmt.Errorf("invalid when condition: %w", err)
 		}
@@ -180,14 +189,25 @@ func validateFilterLeaf(condition objects.Condition) error {
 		return fmt.Errorf("condition field is required")
 	}
 
-	if condition.Field != "prompt_tokens" {
+	switch condition.Field {
+	case "prompt_tokens":
+		return validatePromptTokensLeaf(condition)
+	case "stream":
+		return validateStreamLeaf(condition)
+	case "request_format":
+		return validateStringEqualityLeaf(condition, "request_format")
+	case "daily_time":
+		return validateDailyTimeLeaf(condition)
+	default:
 		return fmt.Errorf("unsupported condition field %q", condition.Field)
 	}
+}
 
+func validatePromptTokensLeaf(condition objects.Condition) error {
 	switch condition.Operator {
 	case "lt", "lte", "gt", "gte", "<", "<=", ">", ">=":
 	default:
-		return fmt.Errorf("unsupported condition operator %q", condition.Operator)
+		return fmt.Errorf("unsupported condition operator %q for prompt_tokens", condition.Operator)
 	}
 
 	value, ok, err := filterConditionValueToInt64(condition)
@@ -196,11 +216,60 @@ func validateFilterLeaf(condition objects.Condition) error {
 	}
 
 	if !ok {
-		return fmt.Errorf("condition value for %s must be an integer", condition.Field)
+		return fmt.Errorf("condition value for prompt_tokens must be an integer")
 	}
 
 	if value < 0 {
-		return fmt.Errorf("%s must be greater than or equal to 0", condition.Field)
+		return fmt.Errorf("prompt_tokens must be greater than or equal to 0")
+	}
+
+	return nil
+}
+
+func validateStreamLeaf(condition objects.Condition) error {
+	switch condition.Operator {
+	case "eq", "ne", "=", "==", "!=":
+	default:
+		return fmt.Errorf("unsupported condition operator %q for stream", condition.Operator)
+	}
+
+	switch condition.Value.(type) {
+	case bool:
+		return nil
+	default:
+		return fmt.Errorf("condition value for stream must be a boolean, got %T", condition.Value)
+	}
+}
+
+func validateStringEqualityLeaf(condition objects.Condition, field string) error {
+	switch condition.Operator {
+	case "eq", "ne", "=", "==", "!=":
+	default:
+		return fmt.Errorf("unsupported condition operator %q for %s", condition.Operator, field)
+	}
+
+	value, ok := condition.Value.(string)
+	if !ok || value == "" {
+		return fmt.Errorf("condition value for %s must be a non-empty string", field)
+	}
+
+	return nil
+}
+
+func validateDailyTimeLeaf(condition objects.Condition) error {
+	switch condition.Operator {
+	case "within", "not_within":
+	default:
+		return fmt.Errorf("unsupported condition operator %q for daily_time", condition.Operator)
+	}
+
+	value, ok := condition.Value.(string)
+	if !ok || value == "" {
+		return fmt.Errorf("condition value for daily_time must be a daily time range")
+	}
+
+	if _, _, err := xtime.ParseDailyTimeRange(value); err != nil {
+		return err
 	}
 
 	return nil
@@ -255,14 +324,7 @@ func (svc *ModelService) CreateModel(ctx context.Context, input ent.CreateModelI
 	}
 
 	createBuilder := svc.entFromContext(ctx).Model.Create().
-		SetDeveloper(input.Developer).
-		SetModelID(input.ModelID).
-		SetIcon(input.Icon).
-		SetType(*input.Type).
-		SetName(input.Name).
-		SetGroup(input.Group).
-		SetModelCard(input.ModelCard).
-		SetSettings(input.Settings)
+		SetInput(input)
 
 	if input.Remark != nil {
 		createBuilder.SetRemark(*input.Remark)
@@ -320,14 +382,7 @@ func (svc *ModelService) BulkCreateModels(ctx context.Context, inputs []*ent.Cre
 	bulk := make([]*ent.ModelCreate, len(inputs))
 	for i, input := range inputs {
 		createBuilder := svc.entFromContext(ctx).Model.Create().
-			SetDeveloper(input.Developer).
-			SetModelID(input.ModelID).
-			SetIcon(input.Icon).
-			SetType(*input.Type).
-			SetName(input.Name).
-			SetGroup(input.Group).
-			SetModelCard(input.ModelCard).
-			SetSettings(input.Settings)
+			SetInput(*input)
 
 		if input.Remark != nil {
 			createBuilder.SetRemark(*input.Remark)
@@ -588,8 +643,9 @@ func (svc *ModelService) ListEnabledModels(ctx context.Context) ([]ModelFacade, 
 
 	// QueryAllChannelModels=true: merge configured models (higher priority) with channel models
 	var (
-		models   = configuredModels
-		modelSet = make(map[string]bool, len(configuredModels))
+		models    = configuredModels
+		modelSet  = make(map[string]bool, len(configuredModels))
+		blacklist = settings.ModelBlacklistRegex
 	)
 
 	for _, m := range configuredModels {
@@ -601,6 +657,15 @@ func (svc *ModelService) ListEnabledModels(ctx context.Context) ([]ModelFacade, 
 
 		for requestModel := range entries {
 			if modelSet[requestModel] {
+				continue
+			}
+
+			// Channel-derived models matching the blacklist regex are excluded.
+			// Configured Model entities above are not affected. Cache the decision
+			// in modelSet so the same model ID coming from another channel skips
+			// the regex match.
+			if blacklist != "" && xregexp.MatchString(blacklist, requestModel) {
+				modelSet[requestModel] = true
 				continue
 			}
 
@@ -643,13 +708,11 @@ func (svc *ModelService) queryConfiguredModelFacades(ctx context.Context, allowe
 	}
 
 	var models []ModelFacade
+	systemSettings := svc.modelSettingsOrDefault(ctx)
 
 	for _, m := range enabledModels {
-		if m.Settings == nil {
-			continue
-		}
-
-		associations := MatchConnections(m.Settings.Associations, channels)
+		effectiveAssociations := EffectiveModelAssociations(systemSettings, m)
+		associations := MatchConnections(effectiveAssociations, channels)
 		if len(associations) > 0 {
 			models = append(models, ModelFacade{
 				ID:          m.ModelID,
@@ -666,33 +729,12 @@ func (svc *ModelService) queryConfiguredModelFacades(ctx context.Context, allowe
 
 // CountAssociatedChannels counts the number of unique channels associated with the given model associations.
 func (svc *ModelService) CountAssociatedChannels(ctx context.Context, associations []*objects.ModelAssociation) (int, error) {
-	if len(associations) == 0 {
-		return 0, nil
-	}
+	return svc.countAssociatedChannels(ctx, associations)
+}
 
-	// Query all enabled/disabled channels
-	channels, err := svc.entFromContext(ctx).Channel.Query().
-		Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
-		All(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query channels: %w", err)
-	}
-
-	if len(channels) == 0 {
-		return 0, nil
-	}
-
-	// Use the shared MatchAssociations function
-	connections := MatchConnections(associations, lo.Map(channels, func(ch *ent.Channel, _ int) *Channel {
-		return &Channel{Channel: ch}
-	}))
-
-	// Remove duplicate channels
-	connections = lo.UniqBy(connections, func(conn *ModelChannelConnection) int {
-		return conn.Channel.ID
-	})
-
-	return len(connections), nil
+// CountModelAssociatedChannels counts associated channels after applying developer-level inherited associations.
+func (svc *ModelService) CountModelAssociatedChannels(ctx context.Context, m *ent.Model) (int, error) {
+	return svc.countAssociatedChannels(ctx, EffectiveModelAssociations(svc.modelSettingsOrDefault(ctx), m))
 }
 
 func (svc *ModelService) QueryUnassociatedChannels(ctx context.Context) ([]*UnassociatedChannel, error) {
@@ -715,14 +757,49 @@ func (svc *ModelService) QueryUnassociatedChannels(ctx context.Context) ([]*Unas
 	}
 
 	allAssociations := make([]*objects.ModelAssociation, 0)
+	systemSettings := svc.modelSettingsOrDefault(ctx)
 
 	for _, m := range models {
-		if m.Settings != nil && len(m.Settings.Associations) > 0 {
-			allAssociations = append(allAssociations, m.Settings.Associations...)
-		}
+		allAssociations = append(allAssociations, EffectiveModelAssociations(systemSettings, m)...)
 	}
 
 	return findUnassociatedChannels(channels, allAssociations), nil
+}
+
+func (svc *ModelService) countAssociatedChannels(ctx context.Context, associations []*objects.ModelAssociation) (int, error) {
+	if len(associations) == 0 {
+		return 0, nil
+	}
+
+	// Query all enabled/disabled channels
+	channels, err := svc.entFromContext(ctx).Channel.Query().
+		Where(channel.StatusIn(channel.StatusEnabled, channel.StatusDisabled)).
+		All(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query channels: %w", err)
+	}
+
+	if len(channels) == 0 {
+		return 0, nil
+	}
+
+	connections := MatchConnections(associations, lo.Map(channels, func(ch *ent.Channel, _ int) *Channel {
+		return &Channel{Channel: ch}
+	}))
+
+	connections = lo.UniqBy(connections, func(conn *ModelChannelConnection) int {
+		return conn.Channel.ID
+	})
+
+	return len(connections), nil
+}
+
+func (svc *ModelService) modelSettingsOrDefault(ctx context.Context) *SystemModelSettings {
+	if svc.systemService == nil {
+		return lo.ToPtr(defaultModelSettings)
+	}
+
+	return svc.systemService.ModelSettingsOrDefault(ctx)
 }
 
 func findUnassociatedChannels(channels []*ent.Channel, associations []*objects.ModelAssociation) []*UnassociatedChannel {

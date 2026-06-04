@@ -397,6 +397,7 @@ func convertGeminiContentToLLMMessage(content *Content, previousContents []*Cont
 			if part.FunctionCall.Args != nil {
 				argsJSON, _ = json.Marshal(part.FunctionCall.Args)
 			}
+
 			tc := llm.ToolCall{
 				ID:   part.FunctionCall.ID,
 				Type: "function",
@@ -451,6 +452,34 @@ func convertGeminiContentToLLMMessage(content *Content, previousContents []*Cont
 	}
 
 	return msg, nil
+}
+
+func citationMetadataFromLLMAnnotations(annotations []llm.Annotation) *CitationMetadata {
+	citations := make([]*Citation, 0, len(annotations))
+	for _, ann := range annotations {
+		if ann.URLCitation == nil || ann.URLCitation.URL == "" {
+			continue
+		}
+
+		citation := &Citation{
+			URI:   ann.URLCitation.URL,
+			Title: ann.URLCitation.Title,
+		}
+		if ann.StartIndex != nil {
+			citation.StartIndex = *ann.StartIndex
+		}
+		if ann.EndIndex != nil {
+			citation.EndIndex = *ann.EndIndex
+		}
+
+		citations = append(citations, citation)
+	}
+
+	if len(citations) == 0 {
+		return nil
+	}
+
+	return &CitationMetadata{Citations: citations}
 }
 
 // convertLLMToGeminiResponse converts unified Response to Gemini GenerateContentResponse.
@@ -609,6 +638,12 @@ func convertLLMChoiceToGeminiCandidate(choice *llm.Choice, isStream bool) *Candi
 
 		content.Parts = parts
 		candidate.Content = content
+	}
+
+	if gm := xmap.GetPtr[GroundingMetadata](choice.TransformerMetadata, TransformerMetadataKeyGroundingMetadata); gm != nil {
+		candidate.GroundingMetadata = gm
+	} else if msg != nil && len(msg.Annotations) > 0 {
+		candidate.CitationMetadata = citationMetadataFromLLMAnnotations(msg.Annotations)
 	}
 
 	// Convert finish reason

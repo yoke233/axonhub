@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"time"
 	"unicode"
 
 	"github.com/samber/lo"
@@ -27,10 +28,16 @@ func filterResolvedCandidatesForRequest(
 		return candidate != nil && candidate.when != nil
 	})
 	if !hasConditionalCandidates {
-		return aggregateChannelModelCandidates(resolvedCandidates)
+		candidates := aggregateChannelModelCandidates(resolvedCandidates)
+		populateAPIFormat(candidates, req)
+
+		return candidates
 	}
 
 	promptTokens := estimatePromptTokens(req)
+	stream := reqStream(req)
+	requestFormat := reqAPIFormat(req)
+	now := time.Now()
 	filtered := make([]*resolvedAssociationCandidate, 0, len(resolvedCandidates))
 
 	for _, candidate := range resolvedCandidates {
@@ -38,12 +45,14 @@ func filterResolvedCandidatesForRequest(
 			continue
 		}
 
-		if !matchesAssociationWhen(promptTokens, candidate.when) {
+		if !matchesAssociationWhen(promptTokens, stream, requestFormat, now, candidate.when) {
 			continue
 		}
 
 		filtered = append(filtered, candidate)
 	}
+
+	candidates := aggregateChannelModelCandidates(filtered)
 
 	if log.DebugEnabled(ctx) {
 		log.Debug(ctx, "evaluated conditional associations",
@@ -52,10 +61,43 @@ func filterResolvedCandidatesForRequest(
 		)
 	}
 
-	return aggregateChannelModelCandidates(filtered)
+	populateAPIFormat(candidates, req)
+
+	return candidates
 }
 
-func matchesAssociationWhen(promptTokens int64, when *objects.ModelAssociationWhen) bool {
+func populateAPIFormat(candidates []*ChannelModelsCandidate, req *llm.Request) {
+	for _, c := range candidates {
+		if c == nil || c.Channel == nil {
+			continue
+		}
+
+		if c.APIFormat != "" {
+			continue
+		}
+
+		endpoints := c.Channel.ResolveEndpoints()
+		c.APIFormat = SelectAPIFormat(endpoints, req)
+	}
+}
+
+func reqStream(req *llm.Request) bool {
+	if req == nil || req.Stream == nil {
+		return false
+	}
+
+	return *req.Stream
+}
+
+func reqAPIFormat(req *llm.Request) string {
+	if req == nil {
+		return ""
+	}
+
+	return string(req.APIFormat)
+}
+
+func matchesAssociationWhen(promptTokens int64, stream bool, requestFormat string, now time.Time, when *objects.ModelAssociationWhen) bool {
 	if when == nil {
 		return true
 	}
@@ -65,7 +107,10 @@ func matchesAssociationWhen(promptTokens int64, when *objects.ModelAssociationWh
 	}
 
 	if when.Condition != nil && !objects.Evaluate(*when.Condition, map[string]any{
-		"prompt_tokens": promptTokens,
+		"prompt_tokens":  promptTokens,
+		"stream":         stream,
+		"request_format": requestFormat,
+		"now":            now,
 	}) {
 		return false
 	}

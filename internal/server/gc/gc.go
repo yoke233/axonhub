@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
-	"github.com/zhenzou/executors"
 	"go.uber.org/fx"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -21,13 +20,24 @@ import (
 	"github.com/looplj/axonhub/internal/ent/usagelog"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/server/biz"
+	"github.com/looplj/axonhub/internal/server/scheduler"
 )
 
-// defaultBatchSize is conservative because request rows can contain large bodies.
-// This can be overridden by config or tests.
-var defaultBatchSize = 50
-
+// defaultBatchSize can be overridden by config or tests.
+var defaultBatchSize = 500
 var defaultBatchThrottle = 150 * time.Millisecond
+
+type TriggerGcCleanupInput struct {
+	RequestsCleanupDays  int `json:"requests_cleanup_days"`
+	UsageLogsCleanupDays int `json:"usage_logs_cleanup_days"`
+}
+
+type GcCleanupPreviewItem struct {
+	ResourceType   string    `json:"resource_type"`
+	EstimatedCount int       `json:"estimated_count"`
+	CutoffTime     time.Time `json:"cutoff_time"`
+	RetentionDays  int       `json:"retention_days"`
+}
 
 type Config struct {
 	CRON          string        `json:"cron" yaml:"cron" conf:"cron" validate:"required"`
@@ -37,14 +47,11 @@ type Config struct {
 	VacuumFull    bool          `json:"vacuum_full" yaml:"vacuum_full" conf:"vacuum_full"`
 }
 
-// Worker handles garbage collection and cleanup operations.
 type Worker struct {
 	SystemService      *biz.SystemService
 	DataStorageService *biz.DataStorageService
-	Executor           executors.ScheduledExecutor
 	Ent                *ent.Client
 	Config             Config
-	CancelFunc         context.CancelFunc
 }
 
 type Params struct {
@@ -56,15 +63,24 @@ type Params struct {
 	Client             *ent.Client
 }
 
-// NewWorker creates a new GCService with daily cleanup scheduling.
 func NewWorker(params Params) *Worker {
-	return &Worker{
+	w := &Worker{
 		SystemService:      params.SystemService,
 		DataStorageService: params.DataStorageService,
-		Executor:           executors.NewPoolScheduleExecutor(executors.WithMaxConcurrent(1)),
 		Ent:                params.Client,
 		Config:             params.Config,
 	}
+
+	return w
+}
+
+func (w *Worker) RegisterScheduledTasks(ctx context.Context, s *scheduler.Scheduler) error {
+	return s.Register(ctx, scheduler.TaskSpec{
+		Name:        "gc",
+		Description: "Garbage collection — cleanup old requests, traces, usage logs, and channel probes",
+		CronExpr:    w.Config.CRON,
+		Timezone:    "UTC",
+	}, w.runAutomaticCleanup)
 }
 
 // deleteIDsInBatches deletes records by small ID batches to limit DB/WAL pressure.
@@ -157,43 +173,14 @@ func (w *Worker) getBatchThrottle() time.Duration {
 	return defaultBatchThrottle
 }
 
-func (w *Worker) Start(ctx context.Context) error {
-	cancelFunc, err := w.Executor.ScheduleFuncAtCronRate(
-		w.runCleanupWithSystemContext,
-		executors.CRONRule{Expr: w.Config.CRON},
-	)
-	if err != nil {
-		return err
-	}
-
-	w.CancelFunc = cancelFunc
-
-	log.Info(ctx, "GC worker started", log.String("cron", w.Config.CRON),
-		log.Bool("cancel_func", w.CancelFunc != nil),
-		log.Bool("ent", w.Ent != nil),
-		log.Bool("executor", w.Executor != nil),
-		log.Bool("system_service", w.SystemService != nil),
-	)
-
-	return nil
-}
-
-func (w *Worker) Stop(ctx context.Context) error {
-	if w.CancelFunc != nil {
-		w.CancelFunc()
-	}
-
-	return w.Executor.Shutdown(ctx)
-}
-
 // runCleanup executes the cleanup process based on storage policy.
-func (w *Worker) runCleanup(ctx context.Context, manual bool) {
-	log.Info(ctx, "Starting automatic cleanup process")
+// When manual is true and manualDays is provided, those days override the policy values.
+func (w *Worker) runCleanup(ctx context.Context, manual bool, manualDays map[string]int) {
+	log.Info(ctx, "Starting cleanup process", log.Bool("manual", manual))
 
 	ctx = ent.NewContext(ctx, w.Ent)
 	ctx = schematype.SkipSoftDelete(ctx)
 
-	// Get storage policy
 	policy, err := w.SystemService.StoragePolicy(ctx)
 	if err != nil {
 		log.Error(ctx, "Failed to get storage policy for cleanup", log.Cause(err))
@@ -202,12 +189,22 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 
 	log.Debug(ctx, "Storage policy for cleanup", log.Any("policy", policy))
 
-	// Execute cleanup for each resource type
 	for _, option := range policy.CleanupOptions {
-		if option.Enabled {
+		if option.Enabled || manual {
+			if manual && manualDays != nil {
+				if _, ok := manualDays[option.ResourceType]; !ok {
+					continue
+				}
+			}
+			days := option.CleanupDays
+			if manual && manualDays != nil {
+				if d, ok := manualDays[option.ResourceType]; ok {
+					days = d
+				}
+			}
 			switch option.ResourceType {
 			case "requests":
-				err := w.cleanupRequests(ctx, option.CleanupDays, manual)
+				err := w.cleanupRequests(ctx, days, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup requests",
 						log.String("resource", option.ResourceType),
@@ -215,10 +212,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 				} else {
 					log.Info(ctx, "Successfully cleaned up requests",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", option.CleanupDays))
+						log.Int("cleanup_days", days))
 				}
 
-				err = w.cleanupThreads(ctx, option.CleanupDays, manual)
+				err = w.cleanupThreads(ctx, days, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup threads",
 						log.String("resource", "threads"),
@@ -226,10 +223,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 				} else {
 					log.Info(ctx, "Successfully cleaned up threads",
 						log.String("resource", "threads"),
-						log.Int("cleanup_days", option.CleanupDays))
+						log.Int("cleanup_days", days))
 				}
 
-				err = w.cleanupTraces(ctx, option.CleanupDays, manual)
+				err = w.cleanupTraces(ctx, days, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup traces",
 						log.String("resource", "traces"),
@@ -237,10 +234,10 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 				} else {
 					log.Info(ctx, "Successfully cleaned up traces",
 						log.String("resource", "traces"),
-						log.Int("cleanup_days", option.CleanupDays))
+						log.Int("cleanup_days", days))
 				}
 			case "usage_logs":
-				err := w.cleanupUsageLogs(ctx, option.CleanupDays, manual)
+				err := w.cleanupUsageLogs(ctx, days, manual)
 				if err != nil {
 					log.Error(ctx, "Failed to cleanup usage logs",
 						log.String("resource", option.ResourceType),
@@ -248,7 +245,7 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 				} else {
 					log.Info(ctx, "Successfully cleaned up usage logs",
 						log.String("resource", option.ResourceType),
-						log.Int("cleanup_days", option.CleanupDays))
+						log.Int("cleanup_days", days))
 				}
 			default:
 				log.Warn(ctx, "Unknown resource type for cleanup",
@@ -257,7 +254,6 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 		}
 	}
 
-	// Always cleanup channel probe data older than 3 days
 	err = w.cleanupChannelProbes(ctx, 3, manual)
 	if err != nil {
 		log.Error(ctx, "Failed to cleanup channel probes",
@@ -267,7 +263,6 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 			log.Int("cleanup_days", 3))
 	}
 
-	// Run VACUUM after cleanup to reclaim storage space (SQLite and PostgreSQL)
 	if w.Config.VacuumEnabled {
 		if err := w.runVacuum(ctx); err != nil {
 			log.Error(ctx, "Failed to run VACUUM after cleanup",
@@ -275,20 +270,17 @@ func (w *Worker) runCleanup(ctx context.Context, manual bool) {
 		}
 	}
 
-	log.Info(ctx, "Automatic cleanup process completed")
+	log.Info(ctx, "Cleanup process completed")
 }
 
 // cleanupRequests deletes requests older than the specified number of days.
 func (w *Worker) cleanupRequests(ctx context.Context, cleanupDays int, manual bool) error {
-	if !manual && cleanupDays <= 0 {
+	if cleanupDays <= 0 {
 		log.Debug(ctx, "No cleanup needed for requests")
-		return nil // No cleanup needed
+		return nil
 	}
 
 	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
-	if manual && cleanupDays == 0 {
-		cutoffTime = time.Now()
-	}
 
 	execResult, err := w.cleanupOldRequestExecutions(ctx, cutoffTime)
 	if err != nil {
@@ -537,14 +529,11 @@ func (w *Worker) getDataStorageCached(ctx context.Context, id int, cache map[int
 
 // cleanupUsageLogs deletes usage logs older than the specified number of days.
 func (w *Worker) cleanupUsageLogs(ctx context.Context, cleanupDays int, manual bool) error {
-	if !manual && cleanupDays <= 0 {
-		return nil // No cleanup needed
+	if cleanupDays <= 0 {
+		return nil
 	}
 
 	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
-	if manual && cleanupDays == 0 {
-		cutoffTime = time.Now()
-	}
 
 	result, err := w.deleteIDsInBatches(ctx, "usage_logs",
 		func(ctx context.Context, batchSize int) ([]int, error) {
@@ -573,15 +562,12 @@ func (w *Worker) cleanupUsageLogs(ctx context.Context, cleanupDays int, manual b
 
 // cleanupThreads deletes threads older than the specified number of days.
 func (w *Worker) cleanupThreads(ctx context.Context, cleanupDays int, manual bool) error {
-	if !manual && cleanupDays <= 0 {
+	if cleanupDays <= 0 {
 		log.Debug(ctx, "No cleanup needed for threads")
-		return nil // No cleanup needed
+		return nil
 	}
 
 	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
-	if manual && cleanupDays == 0 {
-		cutoffTime = time.Now()
-	}
 
 	result, err := w.deleteIDsInBatches(ctx, "threads",
 		func(ctx context.Context, batchSize int) ([]int, error) {
@@ -610,15 +596,12 @@ func (w *Worker) cleanupThreads(ctx context.Context, cleanupDays int, manual boo
 
 // cleanupTraces deletes traces older than the specified number of days.
 func (w *Worker) cleanupTraces(ctx context.Context, cleanupDays int, manual bool) error {
-	if !manual && cleanupDays <= 0 {
+	if cleanupDays <= 0 {
 		log.Debug(ctx, "No cleanup needed for traces")
-		return nil // No cleanup needed
+		return nil
 	}
 
 	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
-	if manual && cleanupDays == 0 {
-		cutoffTime = time.Now()
-	}
 
 	result, err := w.deleteIDsInBatches(ctx, "traces",
 		func(ctx context.Context, batchSize int) ([]int, error) {
@@ -647,15 +630,12 @@ func (w *Worker) cleanupTraces(ctx context.Context, cleanupDays int, manual bool
 
 // cleanupChannelProbes deletes channel probes older than the specified number of days.
 func (w *Worker) cleanupChannelProbes(ctx context.Context, cleanupDays int, manual bool) error {
-	if !manual && cleanupDays <= 0 {
+	if cleanupDays <= 0 {
 		log.Debug(ctx, "No cleanup needed for channel probes")
-		return nil // No cleanup needed
+		return nil
 	}
 
 	cutoffTime := time.Now().AddDate(0, 0, -cleanupDays)
-	if manual && cleanupDays == 0 {
-		cutoffTime = time.Now()
-	}
 
 	result, err := w.deleteIDsInBatches(ctx, "channel_probes",
 		func(ctx context.Context, batchSize int) ([]int, error) {
@@ -682,28 +662,24 @@ func (w *Worker) cleanupChannelProbes(ctx context.Context, cleanupDays int, manu
 	return nil
 }
 
-// runVacuum executes VACUUM command on SQLite/PostgreSQL database to reclaim storage space.
-// This should be called after cleanup operations to defragment the database file.
+// runVacuum executes VACUUM command on SQLite/PostgreSQL database.
 func (w *Worker) runVacuum(ctx context.Context) error {
 	if !w.Config.VacuumEnabled {
 		log.Debug(ctx, "VACUUM is disabled, skipping")
 		return nil
 	}
 
-	// Get the underlying SQL driver to check if it's SQLite
 	dbDriver := w.Ent.Driver()
 	if dbDriver == nil {
 		return fmt.Errorf("failed to get database driver")
 	}
 
-	// Try to cast to *entsql.Driver to access underlying *sql.DB
 	sqlDriver, ok := dbDriver.(*entsql.Driver)
 	if !ok {
 		log.Debug(ctx, "Database driver is not *entsql.Driver, skipping VACUUM")
 		return nil
 	}
 
-	// Check if this is SQLite or PostgreSQL
 	if sqlDriver.Dialect() != dialect.SQLite && sqlDriver.Dialect() != dialect.Postgres {
 		log.Debug(ctx, "Database does not support VACUUM, skipping",
 			log.String("dialect", sqlDriver.Dialect()))
@@ -717,7 +693,6 @@ func (w *Worker) runVacuum(ctx context.Context) error {
 
 	startTime := time.Now()
 
-	// Execute VACUUM using raw SQL
 	var vacuumSQL string
 	if sqlDriver.Dialect() == dialect.Postgres && w.Config.VacuumFull {
 		vacuumSQL = "VACUUM FULL"
@@ -738,14 +713,57 @@ func (w *Worker) runVacuum(ctx context.Context) error {
 }
 
 // RunVacuumNow manually triggers the VACUUM operation.
-// This can be useful for testing or manual execution.
 func (w *Worker) RunVacuumNow(ctx context.Context) error {
 	return w.runVacuum(ctx)
 }
 
-// RunCleanupNow manually triggers the cleanup process.
-// This can be useful for testing or manual execution.
-func (w *Worker) RunCleanupNow(ctx context.Context) error {
-	w.runCleanup(ctx, true)
+// RunCleanupNow manually triggers the cleanup process with the specified days.
+func (w *Worker) RunCleanupNow(ctx context.Context, input TriggerGcCleanupInput) error {
+	manualDays := make(map[string]int)
+	if input.RequestsCleanupDays > 0 {
+		manualDays["requests"] = input.RequestsCleanupDays
+	}
+	if input.UsageLogsCleanupDays > 0 {
+		manualDays["usage_logs"] = input.UsageLogsCleanupDays
+	}
+	w.runCleanup(ctx, true, manualDays)
 	return nil
+}
+
+// PreviewCleanup estimates how many records would be deleted without actually deleting them.
+func (w *Worker) PreviewCleanup(ctx context.Context, input TriggerGcCleanupInput) ([]GcCleanupPreviewItem, error) {
+	ctx = ent.NewContext(ctx, w.Ent)
+	ctx = schematype.SkipSoftDelete(ctx)
+
+	var items []GcCleanupPreviewItem
+
+	if input.RequestsCleanupDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -input.RequestsCleanupDays)
+		count, err := w.Ent.Request.Query().Where(request.CreatedAtLT(cutoff)).Count(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count requests for preview: %w", err)
+		}
+		items = append(items, GcCleanupPreviewItem{
+			ResourceType:   "requests",
+			EstimatedCount: count,
+			CutoffTime:     cutoff,
+			RetentionDays:  input.RequestsCleanupDays,
+		})
+	}
+
+	if input.UsageLogsCleanupDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -input.UsageLogsCleanupDays)
+		count, err := w.Ent.UsageLog.Query().Where(usagelog.CreatedAtLT(cutoff)).Count(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count usage logs for preview: %w", err)
+		}
+		items = append(items, GcCleanupPreviewItem{
+			ResourceType:   "usage_logs",
+			EstimatedCount: count,
+			CutoffTime:     cutoff,
+			RetentionDays:  input.UsageLogsCleanupDays,
+		})
+	}
+
+	return items, nil
 }

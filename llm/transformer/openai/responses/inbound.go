@@ -29,6 +29,11 @@ func NewInboundTransformer() *InboundTransformer {
 	return &InboundTransformer{}
 }
 
+// APIFormat returns the API format of the transformer.
+func (t *InboundTransformer) APIFormat() llm.APIFormat {
+	return llm.APIFormatOpenAIResponse
+}
+
 // TransformRequest transforms OpenAI Responses API HTTP request to llm.Request.
 func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *httpclient.Request) (*llm.Request, error) {
 	if httpReq == nil {
@@ -55,7 +60,7 @@ func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *http
 		return nil, fmt.Errorf("%w: model is required", transformer.ErrInvalidRequest)
 	}
 
-	return convertToLLMRequest(&req)
+	return convertToLLMRequest(&req, httpReq.Body)
 }
 
 // TransformResponse transforms llm.Response to OpenAI Responses API HTTP response.
@@ -161,7 +166,7 @@ func (t *InboundTransformer) TransformError(ctx context.Context, rawErr error) *
 }
 
 // convertToLLMRequest converts OpenAI Responses API Request to llm.Request.
-func convertToLLMRequest(req *Request) (*llm.Request, error) {
+func convertToLLMRequest(req *Request, rawBody ...[]byte) (*llm.Request, error) {
 	chatReq := &llm.Request{
 		Model:               req.Model,
 		Temperature:         req.Temperature,
@@ -288,6 +293,10 @@ func convertToLLMRequest(req *Request) (*llm.Request, error) {
 	// Convert text verbosity
 	if req.Text != nil {
 		chatReq.Verbosity = req.Text.Verbosity
+	}
+
+	if len(rawBody) > 0 {
+		attachOpenAIResponsesRequestExtensions(chatReq, req, rawBody[0])
 	}
 
 	return chatReq, nil
@@ -423,6 +432,7 @@ func convertReasoningWithFollowing(items []Item, startIdx int) (*llm.Message, in
 			if nextItem.Input != nil {
 				inputStr = *nextItem.Input
 			}
+
 			msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
 				ID:   nextItem.CallID,
 				Type: llm.ToolTypeResponsesCustomTool,
@@ -731,6 +741,29 @@ func convertToolsToLLM(tools []Tool) ([]llm.Tool, error) {
 				},
 			})
 
+		case "web_search":
+			webSearch := &llm.WebSearch{}
+			if tool.Filters != nil {
+				webSearch.AllowedDomains = append(webSearch.AllowedDomains, tool.Filters.AllowedDomains...)
+			}
+			if tool.UserLocation != nil {
+				locationType := tool.UserLocation.Type
+				if locationType == "" {
+					locationType = "approximate"
+				}
+				webSearch.UserLocation = llm.WebSearchToolUserLocation{
+					Type:     locationType,
+					City:     tool.UserLocation.City,
+					Country:  tool.UserLocation.Country,
+					Region:   tool.UserLocation.Region,
+					Timezone: tool.UserLocation.Timezone,
+				}
+			}
+			result = append(result, llm.Tool{
+				Type:      llm.ToolTypeWebSearch,
+				WebSearch: webSearch,
+			})
+
 		case "custom":
 			customTool := &llm.ResponseCustomTool{
 				Name:        tool.Name,
@@ -743,6 +776,7 @@ func convertToolsToLLM(tools []Tool) ([]llm.Tool, error) {
 					Definition: tool.Format.Definition,
 				}
 			}
+
 			result = append(result, llm.Tool{
 				Type:               llm.ToolTypeResponsesCustomTool,
 				ResponseCustomTool: customTool,
@@ -757,6 +791,90 @@ func convertToolsToLLM(tools []Tool) ([]llm.Tool, error) {
 	return result, nil
 }
 
+func getResponseWebSearchCallsFromMetadata(metadata map[string]any) []Item {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	raw, ok := metadata[responsesWebSearchCallsTransformerMetadataKey]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	items, ok := raw.([]Item)
+	if !ok {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return nil
+		}
+
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil
+		}
+	}
+
+	result := make([]Item, 0, len(items))
+	for _, item := range items {
+		if item.Type != "web_search_call" || item.Action == nil {
+			continue
+		}
+		result = append(result, Item{
+			ID:     item.ID,
+			Type:   item.Type,
+			Status: item.Status,
+			Action: &WebSearchAction{
+				Type:    item.Action.Type,
+				Query:   item.Action.Query,
+				Queries: append([]string(nil), item.Action.Queries...),
+				Sources: append([]WebSearchSource(nil), item.Action.Sources...),
+			},
+		})
+	}
+
+	return result
+}
+
+func attachAnnotationsToFirstTextItem(items []Item, annotations []llm.Annotation) ([]Item, bool) {
+	if len(items) == 0 || len(annotations) == 0 {
+		return items, false
+	}
+
+	firstTextItemIdx := -1
+	for i := range items {
+		switch items[i].Type {
+		case "output_text", "input_text", "text":
+			firstTextItemIdx = i
+		}
+
+		if firstTextItemIdx >= 0 {
+			break
+		}
+	}
+
+	if firstTextItemIdx < 0 {
+		return items, false
+	}
+
+	items[firstTextItemIdx].Annotations = lo.Map(annotations, func(annotation llm.Annotation, _ int) Annotation {
+		result := Annotation{
+			Type:       annotation.Type,
+			StartIndex: annotation.StartIndex,
+			EndIndex:   annotation.EndIndex,
+		}
+
+		if annotation.URLCitation != nil {
+			result.URLCitation = &URLCitation{
+				URL:   annotation.URLCitation.URL,
+				Title: annotation.URLCitation.Title,
+			}
+		}
+
+		return result
+	})
+
+	return items, true
+}
+
 // convertToResponsesAPIResponse converts llm.Response to Responses API Response.
 func convertToResponsesAPIResponse(chatResp *llm.Response) *Response {
 	resp := &Response{
@@ -764,7 +882,7 @@ func convertToResponsesAPIResponse(chatResp *llm.Response) *Response {
 		ID:                 chatResp.ID,
 		Model:              chatResp.Model,
 		CreatedAt:          chatResp.Created,
-		Output:             make([]Item, 0),
+		Output:             append([]Item(nil), getResponseWebSearchCallsFromMetadata(chatResp.TransformerMetadata)...),
 		Status:             lo.ToPtr("completed"),
 		PreviousResponseID: chatResp.PreviousResponseID,
 	}
@@ -823,18 +941,17 @@ func convertToResponsesAPIResponse(chatResp *llm.Response) *Response {
 		// Handle text content
 		if message.Content.Content != nil && *message.Content.Content != "" {
 			text := *message.Content.Content
+			contentItems, _ := attachAnnotationsToFirstTextItem([]Item{{
+				Type:        "output_text",
+				Text:        &text,
+				Annotations: []Annotation{},
+			}}, message.Annotations)
 			resp.Output = append(resp.Output, Item{
 				ID:   messageItemID,
 				Type: "message",
 				Role: "assistant",
 				Content: &Input{
-					Items: []Item{
-						{
-							Type:        "output_text",
-							Text:        &text,
-							Annotations: []Annotation{},
-						},
-					},
+					Items: contentItems,
 				},
 				Status: lo.ToPtr("completed"),
 			})
@@ -876,6 +993,7 @@ func convertToResponsesAPIResponse(chatResp *llm.Response) *Response {
 			}
 
 			if len(contentItems) > 0 {
+				contentItems, _ = attachAnnotationsToFirstTextItem(contentItems, message.Annotations)
 				resp.Output = append(resp.Output, Item{
 					ID:      messageItemID,
 					Type:    "message",

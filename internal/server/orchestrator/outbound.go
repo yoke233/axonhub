@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/samber/lo"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/log"
+	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xcontext"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
@@ -144,8 +147,8 @@ func (ts *OutboundPersistentStream) Close() error {
 	aggregatedCompleted := false
 
 	if len(ts.responseChunks) > 0 {
-		responseBody, meta, aggErr = ts.transformer.AggregateStreamChunks(context.WithoutCancel(ctx), ts.responseChunks)
-		aggregatedCompleted = aggErr == nil && isCompletedAggregatedOutboundResponse(meta)
+		responseBody, meta, aggErr = ts.transformer.AggregateStreamChunks(context.WithoutCancel(ctx), ts.state.RawProviderRequest, ts.responseChunks)
+		aggregatedCompleted = aggErr == nil && isCompletedAggregated(meta)
 		ts.logFinalizationDecision(ctx, "aggregated_outbound_chunks", streamErr, ctxErr, aggregatedCompleted, aggErr)
 		if aggregatedCompleted {
 			log.Debug(ctx, "Stream has valid complete response without terminal event, treating as completed")
@@ -245,7 +248,7 @@ func (ts *OutboundPersistentStream) persistResponseChunks(ctx context.Context) {
 		persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
-		responseBody, meta, err := ts.transformer.AggregateStreamChunks(persistCtx, ts.responseChunks)
+		responseBody, meta, err := ts.transformer.AggregateStreamChunks(persistCtx, ts.state.RawProviderRequest, ts.responseChunks)
 		if err != nil {
 			log.Warn(persistCtx, "Failed to aggregate chunks using transformer", log.Cause(err))
 			return
@@ -303,8 +306,8 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 	}
 }
 
-func isCompletedAggregatedOutboundResponse(meta llm.ResponseMeta) bool {
-	return meta.Usage != nil
+func isCompletedAggregated(meta llm.ResponseMeta) bool {
+	return meta.Usage != nil && meta.Usage.CompletionTokens > 0
 }
 
 var errSkipCandidateByCircuitBreaker = errors.New("skip candidate by circuit breaker")
@@ -328,6 +331,36 @@ type PersistentOutboundTransformer struct {
 
 	pendingRetryAction         pendingRetryAction
 	clearAuthCooldownOnSuccess bool
+}
+
+func shouldForceStreamingForCandidate(candidate *ChannelModelsCandidate, req *llm.Request) bool {
+	if candidate == nil || candidate.Channel == nil || req == nil {
+		return false
+	}
+
+	if req.Stream != nil && *req.Stream {
+		return false
+	}
+
+	if candidate.Channel.Policies.Stream != objects.CapabilityPolicyRequire {
+		return false
+	}
+
+	return supportsAutoAggregateRequest(req)
+}
+
+func selectOutboundForCandidate(candidate *ChannelModelsCandidate) transformer.Outbound {
+	if candidate == nil || candidate.Channel == nil {
+		return nil
+	}
+
+	if candidate.APIFormat != "" && candidate.Channel.Outbounds != nil {
+		if out, ok := candidate.Channel.Outbounds[candidate.APIFormat]; ok {
+			return out
+		}
+	}
+
+	return candidate.Channel.Outbound
 }
 
 // APIFormat returns the API format of the transformer.
@@ -354,12 +387,15 @@ func (p *PersistentOutboundTransformer) TransformRequest(ctx context.Context, ll
 	entry := candidate.Models[p.state.CurrentModelIndex]
 
 	p.state.CurrentCandidate = candidate
-	p.wrapped = candidate.Channel.Outbound
+	p.state.StreamCompleted = false
+
+	p.wrapped = selectOutboundForCandidate(candidate)
 
 	log.Debug(ctx, "using candidate",
 		log.String("channel", candidate.Channel.Name),
 		log.String("request_model", p.state.OriginalModel),
 		log.String("actual_model", entry.ActualModel),
+		log.String("api_format", candidate.APIFormat),
 	)
 
 	llmRequest.Model = entry.ActualModel
@@ -367,6 +403,22 @@ func (p *PersistentOutboundTransformer) TransformRequest(ctx context.Context, ll
 	// Apply channel transform options to create a new request
 	llmRequest = applyTransformOptions(llmRequest, candidate.Channel.Settings)
 	llmRequest = filterResponseCustomToolMessagesForNonResponsesOutbound(llmRequest, p.wrapped.APIFormat())
+
+	if shouldForceStreamingForCandidate(candidate, llmRequest) {
+		streamPtr := lo.ToPtr(true)
+		llmRequest.Stream = streamPtr
+		if llmRequest.StreamOptions == nil {
+			llmRequest.StreamOptions = &llm.StreamOptions{}
+		}
+		llmRequest.StreamOptions.IncludeUsage = true
+		if p.state != nil && p.state.LlmRequest != nil {
+			p.state.LlmRequest.Stream = streamPtr
+			if p.state.LlmRequest.StreamOptions == nil {
+				p.state.LlmRequest.StreamOptions = &llm.StreamOptions{}
+			}
+			p.state.LlmRequest.StreamOptions.IncludeUsage = true
+		}
+	}
 
 	return p.wrapped.TransformRequest(ctx, llmRequest)
 }
@@ -409,7 +461,7 @@ func (p *PersistentOutboundTransformer) TransformResponse(ctx context.Context, r
 	return p.wrapped.TransformResponse(ctx, response)
 }
 
-func (p *PersistentOutboundTransformer) TransformStream(ctx context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
+func (p *PersistentOutboundTransformer) TransformStream(ctx context.Context, req *httpclient.Request, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
 	persistentStream := NewOutboundPersistentStream(
 		ctx,
 		stream,
@@ -422,14 +474,14 @@ func (p *PersistentOutboundTransformer) TransformStream(ctx context.Context, str
 		p.state,
 	)
 
-	return p.wrapped.TransformStream(ctx, persistentStream)
+	return p.wrapped.TransformStream(ctx, req, persistentStream)
 }
 
 func (p *PersistentOutboundTransformer) AggregateStreamChunks(
-	ctx context.Context,
+	ctx context.Context, req *httpclient.Request,
 	chunks []*httpclient.StreamEvent,
 ) ([]byte, llm.ResponseMeta, error) {
-	return p.wrapped.AggregateStreamChunks(ctx, chunks)
+	return p.wrapped.AggregateStreamChunks(ctx, req, chunks)
 }
 
 // GetRequestExecution returns the current request execution.
@@ -488,9 +540,27 @@ func (p *PersistentOutboundTransformer) HasMoreChannels() bool {
 	return p.state.CurrentCandidateIndex+1 < len(p.state.ChannelModelsCandidates)
 }
 
+// resetPassThroughStreamState cancels the current attempt's fan-out goroutine (if any)
+// and clears pass-through stream state so the next attempt starts with a clean slate.
+// Must be called before every retry to prevent goroutine leaks and data races on
+// state.RawStreamErrRef.
+func (p *PersistentOutboundTransformer) resetPassThroughStreamState() {
+	if p.state.RawStreamCancel != nil {
+		p.state.RawStreamCancel()
+		p.state.RawStreamCancel = nil
+	}
+
+	p.state.RawStreamCh = nil
+	p.state.RawStreamErrRef = nil
+}
+
 // NextChannel moves to the next available candidate for retry.
 // It implements the pipeline.Retryable interface.
 func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
+	// Cancel any in-flight pass-through stream goroutine from the previous attempt
+	// so it exits promptly and releases its upstream HTTP connection.
+	p.resetPassThroughStreamState()
+
 	p.state.CurrentCandidateIndex++
 
 	p.state.CurrentModelIndex = 0
@@ -505,7 +575,7 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 
 	candidate := p.state.ChannelModelsCandidates[p.state.CurrentCandidateIndex]
 	p.state.CurrentCandidate = candidate
-	p.wrapped = candidate.Channel.Outbound
+	p.wrapped = selectOutboundForCandidate(candidate)
 
 	if log.DebugEnabled(ctx) {
 		model := candidate.Models[0].ActualModel
@@ -513,6 +583,7 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 			log.String("channel", candidate.Channel.Name),
 			log.String("model", model),
 			log.Int("index", p.state.CurrentCandidateIndex),
+			log.String("api_format", candidate.APIFormat),
 		)
 	}
 
@@ -539,9 +610,17 @@ func (p *PersistentOutboundTransformer) CanRetry(err error) bool {
 		return true
 	}
 
+	// Local queue rejection: same channel is full or timed out — bounce immediately
+	// to the next channel rather than retrying.
+	if isChannelQueueError(err) {
+		return false
+	}
+
 	// Empty response detection: allow same-channel retry so the pipeline can
 	// re-execute the request against the same (or next model in the) channel.
-	if errors.Is(err, pipeline.ErrEmptyResponse) {
+	if errors.Is(err, pipeline.ErrEmptyResponse) ||
+		errors.Is(err, pipeline.ErrEmptyStreamChunks) ||
+		errors.Is(err, pipeline.ErrEmptyAggregatedBody) {
 		log.Debug(context.Background(), "empty response detected",
 			log.Int("channel_id", p.state.CurrentCandidate.Channel.ID),
 		)
@@ -615,17 +694,22 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 		return nil
 	}
 
+	// Cancel any in-flight pass-through stream goroutine from the previous attempt
+	// so it exits promptly and releases its upstream HTTP connection.
+	p.resetPassThroughStreamState()
+
 	// If there's another model in the list, advance to it.
 	if p.state.CurrentModelIndex+1 < len(candidate.Models) {
 		// Increase the model index to the next model.
 		p.state.CurrentModelIndex++
-		p.wrapped = candidate.Channel.Outbound
+		p.wrapped = selectOutboundForCandidate(candidate)
 
 		if log.DebugEnabled(ctx) {
 			model := candidate.Models[p.state.CurrentModelIndex].ActualModel
 			log.Debug(ctx, "prepared same channel retry for next model",
 				log.Any("channel", candidate.Channel.Name),
 				log.Any("model", model),
+				log.String("api_format", candidate.APIFormat),
 				log.Int("current_candidate_index", p.state.CurrentCandidateIndex),
 				log.Int("current_entry_index", p.state.CurrentModelIndex),
 			)
@@ -676,8 +760,12 @@ func (p *PersistentOutboundTransformer) CustomizeExecutor(executor pipeline.Exec
 		// Use the channel's own HTTP client, which is pre-configured with its proxy settings.
 		customizedExecutor = channel.HTTPClient
 	}
-	// 2. Allow the specific outbound transformer (e.g., for AWS signing) to further customize the client.
-	if custom, ok := channel.Outbound.(pipeline.ChannelCustomizedExecutor); ok {
+	// 2. Allow the selected outbound transformer (e.g., for AWS signing or Responses WebSocket) to further customize the client.
+	outbound := p.wrapped
+	if outbound == nil {
+		outbound = channel.Outbound
+	}
+	if custom, ok := outbound.(pipeline.ChannelCustomizedExecutor); ok {
 		return custom.CustomizeExecutor(customizedExecutor)
 	}
 

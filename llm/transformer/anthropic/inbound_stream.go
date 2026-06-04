@@ -2,9 +2,11 @@ package anthropic
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/samber/lo"
 
 	"github.com/looplj/axonhub/llm"
@@ -18,9 +20,10 @@ func (t *InboundTransformer) TransformStream(
 ) (streams.Stream[*httpclient.StreamEvent], error) {
 	// Create a custom stream that handles the stateful transformation
 	return &anthropicInboundStream{
-		source:    stream,
-		ctx:       ctx,
-		toolCalls: make(map[int]*llm.ToolCall),
+		source:               stream,
+		ctx:                  ctx,
+		toolCalls:            make(map[int]*llm.ToolCall),
+		pendingTextCitations: nil,
 	}, nil
 }
 
@@ -51,6 +54,62 @@ type anthropicInboundStream struct {
 	// Buffered signature: when signature arrives before thinking starts,
 	// we hold it until thinking finishes.
 	pendingSignature *string
+
+	// Buffered citations for the currently open text block. These are emitted as
+	// citations_delta events immediately before the text block is closed.
+	pendingTextCitations []TextCitation
+}
+
+// generateSignature generates a random signature using base64(uuid).
+func generateSignature() string {
+	return base64.StdEncoding.EncodeToString([]byte(uuid.New().String()))
+}
+
+func citationKey(citation TextCitation) string {
+	return citation.Type + "\x00" + citation.URL + "\x00" + citation.Title
+}
+
+func (s *anthropicInboundStream) appendPendingTextCitations(annotations []llm.Annotation, metadata map[string]any) {
+	for _, annotation := range annotations {
+		citation, ok := citationFromLLMAnnotation(annotation, metadata)
+		if !ok {
+			continue
+		}
+
+		key := citationKey(citation)
+		exists := lo.ContainsBy(s.pendingTextCitations, func(existing TextCitation) bool {
+			return citationKey(existing) == key
+		})
+		if exists {
+			continue
+		}
+
+		s.pendingTextCitations = append(s.pendingTextCitations, citation)
+	}
+}
+
+func (s *anthropicInboundStream) flushPendingTextCitations() error {
+	if !s.hasTextContentStarted || len(s.pendingTextCitations) == 0 {
+		return nil
+	}
+
+	for i := range s.pendingTextCitations {
+		citation := s.pendingTextCitations[i]
+		if err := s.enqueEvent(&StreamEvent{
+			Type:  "content_block_delta",
+			Index: &s.contentIndex,
+			Delta: &StreamDelta{
+				Type:     lo.ToPtr("citations_delta"),
+				Citation: &citation,
+			},
+		}); err != nil {
+			return fmt.Errorf("failed to enqueue citations_delta event: %w", err)
+		}
+	}
+
+	s.pendingTextCitations = nil
+
+	return nil
 }
 
 // closeThinkingBlock ensures any open or implied thinking block is properly
@@ -60,6 +119,9 @@ type anthropicInboundStream struct {
 //  2. A thinking block is open — flushes any pending signature as
 //     signature_delta, then emits content_block_stop.
 //  3. Neither — no-op.
+//
+// If no signature is available when closing a thinking block, a random
+// base64-encoded UUID is generated as a placeholder signature.
 func (s *anthropicInboundStream) closeThinkingBlock() error {
 	if s.pendingSignature != nil && !s.hasThinkingContentStarted {
 		sig := s.pendingSignature
@@ -67,6 +129,10 @@ func (s *anthropicInboundStream) closeThinkingBlock() error {
 
 		// Close any previously open content block before creating the synthetic thinking block.
 		if s.hasTextContentStarted {
+			if err := s.flushPendingTextCitations(); err != nil {
+				return fmt.Errorf("failed to flush text citations before pending signature: %w", err)
+			}
+
 			s.hasTextContentStarted = false
 
 			if err := s.enqueEvent(&StreamEvent{
@@ -129,20 +195,24 @@ func (s *anthropicInboundStream) closeThinkingBlock() error {
 	if s.hasThinkingContentStarted {
 		s.hasThinkingContentStarted = false
 
-		if s.pendingSignature != nil {
-			sig := s.pendingSignature
-			s.pendingSignature = nil
+		// Use pending signature if available, otherwise generate a random one.
+		sig := s.pendingSignature
+		s.pendingSignature = nil
 
-			if err := s.enqueEvent(&StreamEvent{
-				Type:  "content_block_delta",
-				Index: &s.contentIndex,
-				Delta: &StreamDelta{
-					Type:      lo.ToPtr("signature_delta"),
-					Signature: sig,
-				},
-			}); err != nil {
-				return fmt.Errorf("failed to enqueue signature_delta event: %w", err)
-			}
+		if sig == nil {
+			rs := generateSignature()
+			sig = &rs
+		}
+
+		if err := s.enqueEvent(&StreamEvent{
+			Type:  "content_block_delta",
+			Index: &s.contentIndex,
+			Delta: &StreamDelta{
+				Type:      lo.ToPtr("signature_delta"),
+				Signature: sig,
+			},
+		}); err != nil {
+			return fmt.Errorf("failed to enqueue signature_delta event: %w", err)
 		}
 
 		if err := s.enqueEvent(&StreamEvent{
@@ -249,12 +319,24 @@ func (s *anthropicInboundStream) Next() bool {
 	if len(chunk.Choices) > 0 {
 		choice := chunk.Choices[0]
 
+		if choice.Message != nil && len(choice.Message.Annotations) > 0 {
+			s.appendPendingTextCitations(choice.Message.Annotations, chunk.TransformerMetadata)
+		}
+		if choice.Delta != nil && len(choice.Delta.Annotations) > 0 {
+			s.appendPendingTextCitations(choice.Delta.Annotations, chunk.TransformerMetadata)
+		}
+
 		// Handle reasoning content (thinking) delta
 		if choice.Delta != nil && choice.Delta.ReasoningContent != nil && *choice.Delta.ReasoningContent != "" {
 			// Some upstreams can emit text before thinking. Anthropic stream
 			// blocks must not share the same index, so close the text block
 			// before starting a thinking block.
 			if s.hasTextContentStarted {
+				if err := s.flushPendingTextCitations(); err != nil {
+					s.err = fmt.Errorf("failed to flush text citations before thinking: %w", err)
+					return false
+				}
+
 				s.hasTextContentStarted = false
 
 				if err := s.enqueEvent(&StreamEvent{
@@ -323,25 +405,17 @@ func (s *anthropicInboundStream) Next() bool {
 			}
 		}
 
-		// Add signature delta before stopping thinking block if signature is available
+		// Buffer signature: always defer emission to closeThinkingBlock so that
+		// we emit exactly one signature_delta per thinking block (avoiding
+		// duplicates when a random placeholder would otherwise be generated).
+		// If multiple signature chunks arrive, concatenate them to match the
+		// aggregator's behavior.
 		if choice.Delta != nil && choice.Delta.ReasoningSignature != nil && *choice.Delta.ReasoningSignature != "" {
-			if !s.hasThinkingContentStarted {
-				// Thinking hasn't started yet (e.g., Responses API sends encrypted_content before thinking).
-				// Buffer the signature and emit it after thinking finishes.
+			if s.pendingSignature == nil {
 				s.pendingSignature = choice.Delta.ReasoningSignature
 			} else {
-				err := s.enqueEvent(&StreamEvent{
-					Type:  "content_block_delta",
-					Index: &s.contentIndex,
-					Delta: &StreamDelta{
-						Type:      lo.ToPtr("signature_delta"),
-						Signature: choice.Delta.ReasoningSignature,
-					},
-				})
-				if err != nil {
-					s.err = fmt.Errorf("failed to enqueue signature_delta event: %w", err)
-					return false
-				}
+				combined := *s.pendingSignature + *choice.Delta.ReasoningSignature
+				s.pendingSignature = &combined
 			}
 		}
 
@@ -372,6 +446,11 @@ func (s *anthropicInboundStream) Next() bool {
 
 			// If the text content has started before the redacted thinking content, we need to stop it
 			if s.hasTextContentStarted {
+				if err := s.flushPendingTextCitations(); err != nil {
+					s.err = fmt.Errorf("failed to flush text citations: %w", err)
+					return false
+				}
+
 				s.hasTextContentStarted = false
 
 				streamEvent := StreamEvent{
@@ -487,6 +566,11 @@ func (s *anthropicInboundStream) Next() bool {
 
 			// If the text content has started before the tool content, we need to stop it
 			if s.hasTextContentStarted {
+				if err := s.flushPendingTextCitations(); err != nil {
+					s.err = fmt.Errorf("failed to flush text citations: %w", err)
+					return false
+				}
+
 				s.hasTextContentStarted = false
 
 				streamEvent := StreamEvent{
@@ -510,18 +594,22 @@ func (s *anthropicInboundStream) Next() bool {
 				if _, ok := s.toolCalls[toolCallIndex]; !ok {
 					// Start a new tool use block, we should stop the previous tool use block
 					if toolCallIndex > 0 {
-						streamEvent := StreamEvent{
-							Type:  "content_block_stop",
-							Index: &s.contentIndex,
-						}
+						if s.hasToolContentStarted {
+							s.hasToolContentStarted = false
 
-						err := s.enqueEvent(&streamEvent)
-						if err != nil {
-							s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
-							return false
-						}
+							streamEvent := StreamEvent{
+								Type:  "content_block_stop",
+								Index: &s.contentIndex,
+							}
 
-						s.contentIndex += 1
+							err := s.enqueEvent(&streamEvent)
+							if err != nil {
+								s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+								return false
+							}
+
+							s.contentIndex += 1
+						}
 					}
 
 					s.hasToolContentStarted = true
@@ -533,16 +621,26 @@ func (s *anthropicInboundStream) Next() bool {
 							Name:      deltaToolCall.Function.Name,
 							Arguments: "",
 						},
+						TransformerMetadata: deltaToolCall.TransformerMetadata,
+					}
+
+					// Restore the original Anthropic block type (tool_use /
+					// server_tool_use / mcp_tool_use / ...) and caller when the
+					// upstream tagged it via TransformerMetadata.
+					blockType := "tool_use"
+					if at := getAnthropicType(deltaToolCall.TransformerMetadata); at != "" {
+						blockType = at
 					}
 
 					streamEvent := StreamEvent{
 						Type:  "content_block_start",
 						Index: &s.contentIndex,
 						ContentBlock: &MessageContentBlock{
-							Type:  "tool_use",
-							ID:    deltaToolCall.ID,
-							Name:  &deltaToolCall.Function.Name,
-							Input: json.RawMessage("{}"),
+							Type:   blockType,
+							ID:     deltaToolCall.ID,
+							Name:   &deltaToolCall.Function.Name,
+							Input:  json.RawMessage("{}"),
+							Caller: getAnthropicCaller(deltaToolCall.TransformerMetadata),
 						},
 					}
 
@@ -598,24 +696,143 @@ func (s *anthropicInboundStream) Next() bool {
 			}
 		}
 
-		// Handle finish reason
-		if choice.FinishReason != nil && !s.hasFinished {
-			s.hasFinished = true
-
+		// Handle assistant-inlined tool results (Anthropic *_tool_result
+		// blocks carried via llm.Message.InlineToolResults). Each one is
+		// emitted as a complete content_block_start + content_block_stop
+		// pair, since Anthropic delivers tool result blocks whole.
+		if choice.Delta != nil && len(choice.Delta.InlineToolResults) > 0 {
 			if err := s.closeThinkingBlock(); err != nil {
 				s.err = fmt.Errorf("failed to close thinking block: %w", err)
 				return false
 			}
 
-			streamEvent := StreamEvent{
-				Type:  "content_block_stop",
-				Index: &s.contentIndex,
+			// Close any open tool_use block before starting a tool_result.
+			if s.hasToolContentStarted {
+				s.hasToolContentStarted = false
+
+				stopEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+				if err := s.enqueEvent(&stopEvent); err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
 			}
 
-			err := s.enqueEvent(&streamEvent)
-			if err != nil {
-				s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+			// Close any open text block before starting a tool_result.
+			if s.hasTextContentStarted {
+				s.hasTextContentStarted = false
+
+				stopEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+				if err := s.enqueEvent(&stopEvent); err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
+			}
+
+			for _, ir := range choice.Delta.InlineToolResults {
+				block, ok := toolResultBlockFromInline(ir)
+				if !ok {
+					continue
+				}
+
+				startEvent := StreamEvent{
+					Type:         "content_block_start",
+					Index:        &s.contentIndex,
+					ContentBlock: &block,
+				}
+				if err := s.enqueEvent(&startEvent); err != nil {
+					s.err = fmt.Errorf("failed to enqueue *_tool_result content_block_start: %w", err)
+					return false
+				}
+
+				stopEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+				if err := s.enqueEvent(&stopEvent); err != nil {
+					s.err = fmt.Errorf("failed to enqueue *_tool_result content_block_stop: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
+			}
+		}
+
+		// Handle finish reason
+		if choice.FinishReason != nil && !s.hasFinished {
+			s.hasFinished = true
+
+			contentClosed := false
+
+			if err := s.closeThinkingBlock(); err != nil {
+				s.err = fmt.Errorf("failed to close thinking block: %w", err)
 				return false
+			}
+			if s.lastEventType == "content_block_stop" {
+				contentClosed = true
+			}
+
+			if s.hasTextContentStarted {
+				if err := s.flushPendingTextCitations(); err != nil {
+					s.err = fmt.Errorf("failed to flush text citations: %w", err)
+					return false
+				}
+
+				s.hasTextContentStarted = false
+
+				streamEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+
+				err := s.enqueEvent(&streamEvent)
+				if err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
+				contentClosed = true
+			}
+
+			if s.hasToolContentStarted {
+				s.hasToolContentStarted = false
+
+				streamEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+
+				err := s.enqueEvent(&streamEvent)
+				if err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
+
+				s.contentIndex += 1
+				contentClosed = true
+			}
+
+			if !contentClosed && !s.hasTextContentStarted && !s.hasToolContentStarted && !s.hasThinkingContentStarted {
+				streamEvent := StreamEvent{
+					Type:  "content_block_stop",
+					Index: &s.contentIndex,
+				}
+
+				err := s.enqueEvent(&streamEvent)
+				if err != nil {
+					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+					return false
+				}
 			}
 
 			// Convert finish reason to Anthropic format

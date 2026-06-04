@@ -23,6 +23,7 @@ import (
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
+	"github.com/looplj/axonhub/internal/pkg/xregexp"
 	"github.com/looplj/axonhub/internal/pkg/xtime"
 	"github.com/looplj/axonhub/llm/httpclient"
 )
@@ -44,6 +45,9 @@ const (
 
 	// SystemKeyBrandLogo is the key for the brand logo (base64 encoded).
 	SystemKeyBrandLogo = "system_brand_logo"
+
+	// SystemKeyTitle is the key for the browser page title.
+	SystemKeyTitle = "system_title"
 
 	// SystemKeyStoreChunks is the key used to store the store_chunks flag in the system table.
 	// If set to true, the system will store chunks in the database.
@@ -93,6 +97,22 @@ const (
 	// SystemKeyUserAgentPassThrough is the key used to store the user agent pass-through setting.
 	// When set to true, the system will pass through the original User-Agent header to upstream AI providers.
 	SystemKeyUserAgentPassThrough = "system_user_agent_pass_through"
+
+	// SystemKeyPassThrough is the key used to store the global body/response pass-through setting.
+	// When set to true, channels that do not explicitly disable pass-through will forward the original
+	// request body and the raw provider response/stream to the client without re-serialization, as long as
+	// the inbound and outbound API formats are identical.
+	//
+	//nolint:gosec // Not a secret.
+	SystemKeyPassThrough = "system_pass_through"
+
+	// SystemKeyQuotaEnforcementSettings is the key used to store the quota enforcement settings.
+	// The value is JSON-encoded QuotaEnforcementSettings struct.
+	SystemKeyQuotaEnforcementSettings = "quota_enforcement_settings"
+
+	// SystemKeySecuritySettings is the key used to store security settings.
+	// The value is JSON-encoded SecuritySettings struct.
+	SystemKeySecuritySettings = "security_settings"
 )
 
 // SystemGeneralSettings represents general system configuration settings.
@@ -113,6 +133,81 @@ type VideoStorageSettings struct {
 	ScanIntervalMinutes int `json:"scan_interval_minutes"`
 	// ScanLimit is the max number of requests processed per scan.
 	ScanLimit int `json:"scan_limit"`
+}
+
+// QuotaEnforcementMode defines how quota enforcement is applied.
+type QuotaEnforcementMode string
+
+const (
+	// QuotaEnforcementModeExhaustedOnly filters out channels with exhausted quota only.
+	QuotaEnforcementModeExhaustedOnly QuotaEnforcementMode = "exhausted_only"
+	// QuotaEnforcementModeDePrioritize deprioritizes exhausted channels and penalizes warning channels.
+	QuotaEnforcementModeDePrioritize QuotaEnforcementMode = "de_prioritize"
+)
+
+func (m QuotaEnforcementMode) MarshalGQL(w io.Writer) {
+	var s string
+
+	switch m {
+	case QuotaEnforcementModeExhaustedOnly:
+		s = "EXHAUSTED_ONLY"
+	case QuotaEnforcementModeDePrioritize:
+		s = "DE_PRIORITIZE"
+	default:
+		s = "EXHAUSTED_ONLY"
+	}
+
+	_, _ = io.WriteString(w, `"`+s+`"`)
+}
+
+func (m *QuotaEnforcementMode) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("QuotaEnforcementMode must be a string")
+	}
+
+	switch str {
+	case "EXHAUSTED_ONLY":
+		*m = QuotaEnforcementModeExhaustedOnly
+	case "DE_PRIORITIZE":
+		*m = QuotaEnforcementModeDePrioritize
+	default:
+		return fmt.Errorf("invalid QuotaEnforcementMode: %s", str)
+	}
+
+	return nil
+}
+
+func (m *QuotaEnforcementMode) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("invalid QuotaEnforcementMode: %w", err)
+	}
+
+	switch raw {
+	case "EXHAUSTED_ONLY", string(QuotaEnforcementModeExhaustedOnly):
+		*m = QuotaEnforcementModeExhaustedOnly
+	case "DE_PRIORITIZE", string(QuotaEnforcementModeDePrioritize):
+		*m = QuotaEnforcementModeDePrioritize
+	default:
+		return fmt.Errorf("invalid QuotaEnforcementMode: %q", raw)
+	}
+
+	return nil
+}
+
+// QuotaEnforcementSettings represents quota enforcement configuration.
+type QuotaEnforcementSettings struct {
+	// Enabled controls whether quota enforcement is active.
+	Enabled bool `json:"enabled"`
+	// Mode defines how quota is enforced.
+	Mode QuotaEnforcementMode `json:"mode"`
+}
+
+// SecuritySettings represents system-wide request access controls.
+type SecuritySettings struct {
+	// BlockedIPs contains IP addresses or CIDR ranges that cannot use external APIs.
+	BlockedIPs []string `json:"blocked_ips"`
 }
 
 // BackupFrequency represents how often automatic backups should run.
@@ -137,12 +232,29 @@ type AutoBackupSettings struct {
 	IncludeModels      bool `json:"include_models"`
 	IncludeAPIKeys     bool `json:"include_api_keys"`
 	IncludeModelPrices bool `json:"include_model_prices"`
+	IncludeUsageStats  bool `json:"include_usage_stats"`
+	IncludeRequestLogs bool `json:"include_request_logs"`
 	// RetentionDays defines how many days to keep backups (0 = keep all)
 	RetentionDays int `json:"retention_days"`
 	// LastBackupAt is the timestamp of the last successful backup
 	LastBackupAt *time.Time `json:"last_backup_at,omitempty"`
 	// LastBackupError is the error message from the last backup attempt (if any)
 	LastBackupError string `json:"last_backup_error,omitempty"`
+}
+
+type autoBackupSettingsJSON struct {
+	Enabled            bool            `json:"enabled"`
+	Frequency          BackupFrequency `json:"frequency"`
+	DataStorageID      int             `json:"data_storage_id"`
+	IncludeChannels    bool            `json:"include_channels"`
+	IncludeModels      bool            `json:"include_models"`
+	IncludeAPIKeys     bool            `json:"include_api_keys"`
+	IncludeModelPrices bool            `json:"include_model_prices"`
+	IncludeUsageStats  *bool           `json:"include_usage_stats"`
+	IncludeRequestLogs *bool           `json:"include_request_logs"`
+	RetentionDays      int             `json:"retention_days"`
+	LastBackupAt       *time.Time      `json:"last_backup_at,omitempty"`
+	LastBackupError    string          `json:"last_backup_error,omitempty"`
 }
 
 // StoragePolicy represents the storage policy configuration.
@@ -170,7 +282,18 @@ const (
 
 	// LoadBalancerStrategyCircuitBreaker is a dynamic load balancer strategy that monitors the health of channels and fails over to a backup channel when the primary channel is unhealthy.
 	LoadBalancerStrategyCircuitBreaker = "circuit-breaker"
+
+	// UpstreamErrorModePassthrough keeps provider errors unchanged.
+	UpstreamErrorModePassthrough = "passthrough"
+
+	// UpstreamErrorModeHidden replaces provider errors with a safe default message.
+	UpstreamErrorModeHidden = "hidden"
+
+	// UpstreamErrorModeCustom replaces provider errors with an admin-defined message.
+	UpstreamErrorModeCustom = "custom"
 )
+
+const DefaultUpstreamErrorMessage = "Upstream provider request failed. Please try again later."
 
 // RetryPolicy represents the retry policy configuration.
 type RetryPolicy struct {
@@ -195,6 +318,17 @@ type RetryPolicy struct {
 	// When enabled, the pipeline pre-reads stream events to check if the response
 	// contains meaningful content, and marks empty responses as failed attempts for retry handling.
 	EmptyResponseDetection bool `json:"empty_response_detection"`
+
+	// UpstreamErrorPolicy controls how provider errors are exposed to API users.
+	UpstreamErrorPolicy UpstreamErrorPolicy `json:"upstream_error_policy"`
+}
+
+type UpstreamErrorPolicy struct {
+	// Mode controls whether provider errors are passed through, hidden, or replaced with a custom message.
+	Mode string `json:"mode"`
+
+	// CustomMessage is returned to API users when Mode is custom.
+	CustomMessage string `json:"custom_message"`
 }
 
 type AutoDisableChannel struct {
@@ -219,13 +353,13 @@ type WebhookNotifierConfig struct {
 }
 
 type WebhookTarget struct {
-	Name      string                `json:"name"`
-	Enabled   bool                  `json:"enabled"`
-	URL       string                `json:"url"`
+	Name      string                  `json:"name"`
+	Enabled   bool                    `json:"enabled"`
+	URL       string                  `json:"url"`
 	Proxy     *httpclient.ProxyConfig `json:"proxy,omitempty"`
-	TimeoutMs int                   `json:"timeout_ms"`
-	Headers   []objects.HeaderEntry `json:"headers"`
-	Body      string                `json:"body"`
+	TimeoutMs int                     `json:"timeout_ms"`
+	Headers   []objects.HeaderEntry   `json:"headers"`
+	Body      string                  `json:"body"`
 }
 
 type WebhookSubscription struct {
@@ -253,6 +387,29 @@ type SystemModelSettings struct {
 	// When true, /v1/models behaves like /v1/models?include=all.
 	// When false, /v1/models returns only the basic compatibility fields by default.
 	DefaultModelAPIIncludeAll bool `json:"default_model_api_include_all"`
+
+	// AutoReasoningEffort controls whether model names with reasoning effort suffixes
+	// like "gpt-5.4-xhigh" are normalized to the base model and reasoning_effort.
+	// When true, the suffix is stripped from model and applied to request.reasoning_effort,
+	// overriding any reasoning_effort already set in the request.
+	AutoReasoningEffort bool `json:"auto_reasoning_effort"`
+
+	// ModelBlacklistRegex is a regex pattern. When QueryAllChannelModels is true,
+	// channel-derived model IDs matching this pattern are excluded from the models
+	// API output. Configured Model entities are not affected. An empty string
+	// disables the filter. Only effective when QueryAllChannelModels is true.
+	ModelBlacklistRegex string `json:"model_blacklist_regex"`
+
+	// DeveloperSettings stores reusable channel association rules keyed by model developer.
+	// Models with the same developer inherit these associations before applying their
+	// own model-level associations.
+	DeveloperSettings []*DeveloperModelSettings `json:"developer_settings"`
+}
+
+// DeveloperModelSettings represents reusable model association rules for one model developer.
+type DeveloperModelSettings struct {
+	Developer    string                      `json:"developer"`
+	Associations []*objects.ModelAssociation `json:"associations"`
 }
 
 type SystemChannelSettings struct {
@@ -678,6 +835,28 @@ func (s *SystemService) SetBrandLogo(ctx context.Context, brandLogo string) erro
 	return s.setSystemValue(ctx, SystemKeyBrandLogo, brandLogo)
 }
 
+// Title retrieves the browser page title.
+func (s *SystemService) Title(ctx context.Context) (string, error) {
+	ctx = authz.WithSystemBypass(ctx, "system-title")
+	client := s.entFromContext(ctx)
+
+	sys, err := client.System.Query().Where(system.KeyEQ(SystemKeyTitle)).Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return "", nil
+		}
+
+		return "", fmt.Errorf("failed to get title: %w", err)
+	}
+
+	return sys.Value, nil
+}
+
+// SetTitle sets the browser page title.
+func (s *SystemService) SetTitle(ctx context.Context, title string) error {
+	return s.setSystemValue(ctx, SystemKeyTitle, title)
+}
+
 func (s *SystemService) getSystemValue(ctx context.Context, key string) (string, error) {
 	cacheKey := "system:" + key
 	if v, err := s.Cache.Get(ctx, cacheKey); err == nil {
@@ -763,6 +942,12 @@ func (s *SystemService) StoragePolicyOrDefault(ctx context.Context) *StoragePoli
 
 // SetStoragePolicy sets the storage policy configuration.
 func (s *SystemService) SetStoragePolicy(ctx context.Context, policy *StoragePolicy) error {
+	for _, opt := range policy.CleanupOptions {
+		if opt.CleanupDays <= 0 {
+			return fmt.Errorf("cleanup_days for %q must be positive; set enabled=false to keep data forever", opt.ResourceType)
+		}
+	}
+
 	jsonBytes, err := json.Marshal(policy)
 	if err != nil {
 		return fmt.Errorf("failed to marshal storage policy: %w", err)
@@ -838,6 +1023,17 @@ func normalizeRetryPolicy(policy *RetryPolicy) {
 
 	if policy.AutoDisableChannel.Statuses == nil {
 		policy.AutoDisableChannel.Statuses = []AutoDisableChannelStatus{}
+	}
+
+	switch policy.UpstreamErrorPolicy.Mode {
+	case UpstreamErrorModePassthrough, UpstreamErrorModeHidden, UpstreamErrorModeCustom:
+	default:
+		policy.UpstreamErrorPolicy.Mode = defaultRetryPolicy.UpstreamErrorPolicy.Mode
+	}
+
+	if policy.UpstreamErrorPolicy.Mode == UpstreamErrorModeCustom &&
+		strings.TrimSpace(policy.UpstreamErrorPolicy.CustomMessage) == "" {
+		policy.UpstreamErrorPolicy.Mode = UpstreamErrorModeHidden
 	}
 }
 
@@ -920,6 +1116,7 @@ func (s *SystemService) ModelSettings(ctx context.Context) (*SystemModelSettings
 	if err := json.Unmarshal([]byte(value), &settings); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal model settings: %w", err)
 	}
+	normalizeSystemModelSettings(&settings)
 
 	return &settings, nil
 }
@@ -942,6 +1139,15 @@ func (s *SystemService) ModelSettingsOrDefault(ctx context.Context) *SystemModel
 
 // SetModelSettings sets the model settings configuration.
 func (s *SystemService) SetModelSettings(ctx context.Context, settings SystemModelSettings) error {
+	if err := xregexp.ValidateRegex(settings.ModelBlacklistRegex); err != nil {
+		return fmt.Errorf("invalid model blacklist regex: %w", err)
+	}
+
+	normalizeSystemModelSettings(&settings)
+	if err := validateSystemModelSettings(&settings); err != nil {
+		return err
+	}
+
 	jsonBytes, err := json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("failed to marshal model settings: %w", err)
@@ -1132,9 +1338,33 @@ func (s *SystemService) AutoBackupSettings(ctx context.Context) (*AutoBackupSett
 		return nil, fmt.Errorf("failed to get auto backup settings: %w", err)
 	}
 
-	var settings AutoBackupSettings
-	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+	var stored autoBackupSettingsJSON
+	if err := json.Unmarshal([]byte(value), &stored); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal auto backup settings: %w", err)
+	}
+
+	includeUsageStats := defaultAutoBackupSettings.IncludeUsageStats
+	if stored.IncludeUsageStats != nil {
+		includeUsageStats = *stored.IncludeUsageStats
+	}
+	includeRequestLogs := defaultAutoBackupSettings.IncludeRequestLogs
+	if stored.IncludeRequestLogs != nil {
+		includeRequestLogs = *stored.IncludeRequestLogs
+	}
+
+	settings := AutoBackupSettings{
+		Enabled:            stored.Enabled,
+		Frequency:          stored.Frequency,
+		DataStorageID:      stored.DataStorageID,
+		IncludeChannels:    stored.IncludeChannels,
+		IncludeModels:      stored.IncludeModels,
+		IncludeAPIKeys:     stored.IncludeAPIKeys,
+		IncludeModelPrices: stored.IncludeModelPrices,
+		IncludeUsageStats:  includeUsageStats,
+		IncludeRequestLogs: includeRequestLogs,
+		RetentionDays:      stored.RetentionDays,
+		LastBackupAt:       stored.LastBackupAt,
+		LastBackupError:    stored.LastBackupError,
 	}
 
 	return &settings, nil
@@ -1241,6 +1471,159 @@ func (s *SystemService) SetUserAgentPassThrough(ctx context.Context, enabled boo
 	}
 
 	return s.setSystemValue(ctx, SystemKeyUserAgentPassThrough, strValue)
+}
+
+// PassThrough retrieves the global body/response pass-through setting.
+// When enabled, channels that do not explicitly override pass-through will forward the
+// original request body and the raw provider response/stream to the client without
+// re-serialization, as long as the inbound and outbound API formats are identical.
+func (s *SystemService) PassThrough(ctx context.Context) (bool, error) {
+	value, err := s.getSystemValue(ctx, SystemKeyPassThrough)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("failed to get pass-through: %w", err)
+	}
+
+	return value == "true", nil
+}
+
+// SetPassThrough sets the global body/response pass-through setting.
+func (s *SystemService) SetPassThrough(ctx context.Context, enabled bool) error {
+	strValue := "false"
+	if enabled {
+		strValue = "true"
+	}
+
+	return s.setSystemValue(ctx, SystemKeyPassThrough, strValue)
+}
+
+// QuotaEnforcementSettings retrieves the quota enforcement settings.
+func (s *SystemService) QuotaEnforcementSettings(ctx context.Context) (*QuotaEnforcementSettings, error) {
+	value, err := s.getSystemValue(ctx, SystemKeyQuotaEnforcementSettings)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return lo.ToPtr(defaultQuotaEnforcementSettings), nil
+		}
+
+		return nil, fmt.Errorf("failed to get quota enforcement settings: %w", err)
+	}
+
+	var settings QuotaEnforcementSettings
+	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal quota enforcement settings: %w", err)
+	}
+
+	if settings.Mode == "" {
+		settings.Mode = defaultQuotaEnforcementSettings.Mode
+	}
+
+	return &settings, nil
+}
+
+// QuotaEnforcementSettingsOrDefault retrieves the quota enforcement settings or returns the default.
+func (s *SystemService) QuotaEnforcementSettingsOrDefault(ctx context.Context) *QuotaEnforcementSettings {
+	settings, err := s.QuotaEnforcementSettings(ctx)
+	if err != nil {
+		log.Warn(ctx, "failed to get quota enforcement settings", log.Cause(err))
+
+		return lo.ToPtr(defaultQuotaEnforcementSettings)
+	}
+
+	return settings
+}
+
+// SetQuotaEnforcementSettings sets the quota enforcement settings.
+func (s *SystemService) SetQuotaEnforcementSettings(ctx context.Context, settings QuotaEnforcementSettings) error {
+	if settings.Mode == "" {
+		settings.Mode = defaultQuotaEnforcementSettings.Mode
+	}
+
+	if settings.Mode != QuotaEnforcementModeExhaustedOnly && settings.Mode != QuotaEnforcementModeDePrioritize {
+		return fmt.Errorf("invalid quota enforcement mode: %q", settings.Mode)
+	}
+
+	jsonBytes, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal quota enforcement settings: %w", err)
+	}
+
+	return s.setSystemValue(ctx, SystemKeyQuotaEnforcementSettings, string(jsonBytes))
+}
+
+// SecuritySettings retrieves the security settings.
+func (s *SystemService) SecuritySettings(ctx context.Context) (*SecuritySettings, error) {
+	value, err := s.getSystemValue(ctx, SystemKeySecuritySettings)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return lo.ToPtr(defaultSecuritySettings), nil
+		}
+
+		return nil, fmt.Errorf("failed to get security settings: %w", err)
+	}
+
+	var settings SecuritySettings
+	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal security settings: %w", err)
+	}
+
+	normalizeSecuritySettings(&settings)
+
+	return &settings, nil
+}
+
+// SecuritySettingsOrDefault retrieves the security settings or returns the default.
+func (s *SystemService) SecuritySettingsOrDefault(ctx context.Context) *SecuritySettings {
+	settings, err := s.SecuritySettings(ctx)
+	if err != nil {
+		log.Warn(ctx, "failed to get security settings", log.Cause(err))
+
+		return lo.ToPtr(defaultSecuritySettings)
+	}
+
+	return settings
+}
+
+// SetSecuritySettings sets the security settings.
+func (s *SystemService) SetSecuritySettings(ctx context.Context, settings SecuritySettings) error {
+	normalizeSecuritySettings(&settings)
+
+	jsonBytes, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal security settings: %w", err)
+	}
+
+	return s.setSystemValue(ctx, SystemKeySecuritySettings, string(jsonBytes))
+}
+
+func normalizeSecuritySettings(settings *SecuritySettings) {
+	if settings == nil {
+		return
+	}
+
+	if settings.BlockedIPs == nil {
+		settings.BlockedIPs = []string{}
+	}
+
+	seen := make(map[string]struct{}, len(settings.BlockedIPs))
+	blockedIPs := make([]string, 0, len(settings.BlockedIPs))
+	for _, value := range settings.BlockedIPs {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		if _, ok := seen[value]; ok {
+			continue
+		}
+
+		seen[value] = struct{}{}
+		blockedIPs = append(blockedIPs, value)
+	}
+
+	settings.BlockedIPs = blockedIPs
 }
 
 // UpdateAutoBackupLastRun updates the last backup timestamp and error status.

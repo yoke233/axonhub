@@ -37,6 +37,7 @@ type Handlers struct {
 	Antigravity    *api.AntigravityHandlers
 	Copilot        *api.CopilotHandlers
 	RequestContent *api.RequestContentHandlers
+	OIDC           *api.OIDCHandlers
 	RequestPreview *api.RequestPreviewHandlers
 }
 
@@ -46,6 +47,7 @@ type Services struct {
 	TraceService  *biz.TraceService
 	ThreadService *biz.ThreadService
 	AuthService   *biz.AuthService
+	SystemService *biz.SystemService
 }
 
 func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services Services) {
@@ -89,6 +91,11 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		unSecureAdminGroup.POST("/auth/signin", handlers.Auth.SignIn)
 	}
 
+	oauthGroup := server.Group("/oauth", middleware.WithTimeout(server.Config.RequestTimeout))
+	{
+		handlers.OIDC.RegisterRoutes(oauthGroup)
+	}
+
 	adminGroup := server.Group("/admin", middleware.WithJWTAuth(services.AuthService), middleware.WithProjectID())
 	// 管理员路由 - 使用 JWT 认证
 	{
@@ -103,6 +110,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		adminGroup.POST("/codex/oauth/exchange", handlers.Codex.Exchange)
 		adminGroup.POST("/codex/device/start", handlers.Codex.StartDevice)
 		adminGroup.POST("/codex/device/poll", handlers.Codex.PollDevice)
+		adminGroup.POST("/codex/auth/decode", handlers.Codex.DecodeAuthJSON)
 
 		adminGroup.POST("/claudecode/oauth/start", handlers.ClaudeCode.StartOAuth)
 		adminGroup.POST("/claudecode/oauth/exchange", handlers.ClaudeCode.Exchange)
@@ -112,6 +120,9 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 
 		adminGroup.POST("/copilot/oauth/start", handlers.Copilot.StartOAuth)
 		adminGroup.POST("/copilot/oauth/poll", handlers.Copilot.PollOAuth)
+
+		// OIDC Manual Linking
+		adminGroup.GET("/oidc/link/:provider", handlers.OIDC.GetLinkAuthorizeURL)
 
 		// Playground API with channel specification support
 		adminGroup.POST(
@@ -160,7 +171,12 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		}
 	}
 
-	openAPIGroup := server.Group("/openapi", middleware.WithOpenAPIAuth(services.AuthService), middleware.WithTimeout(server.Config.RequestTimeout))
+	openAPIGroup := server.Group(
+		"/openapi",
+		middleware.WithIPBlocklist(services.SystemService),
+		middleware.WithOpenAPIAuth(services.AuthService),
+		middleware.WithTimeout(server.Config.RequestTimeout),
+	)
 	{
 		openAPIGroup.POST("/v1/graphql", func(c *gin.Context) {
 			handlers.OpenAPIGraphql.Graphql.ServeHTTP(c.Writer, c.Request)
@@ -175,6 +191,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 	apiGroup := server.Group("/",
 		middleware.WithTimeout(server.Config.LLMRequestTimeout),
 		middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
+		middleware.WithIPBlocklist(services.SystemService),
 		middleware.WithAPIKeyConfig(services.AuthService, nil),
 		middleware.WithSource(request.SourceAPI),
 		middleware.WithThread(server.Config.Trace, services.ThreadService),
@@ -184,6 +201,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 	{
 		openaiGroup := apiGroup.Group("/v1")
 		openaiGroup.POST("/chat/completions", handlers.OpenAI.ChatCompletion)
+		openaiGroup.POST("/completions", handlers.OpenAI.Completion)
 		openaiGroup.POST("/responses/compact", handlers.OpenAI.CompactResponse)
 		openaiGroup.GET("/responses", handlers.OpenAI.ResponsesWebsocket)
 		openaiGroup.POST("/responses", handlers.OpenAI.CreateResponse)
@@ -233,6 +251,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		geminiGroup := server.Group("/gemini/:gemini-api-version",
 			middleware.WithTimeout(server.Config.LLMRequestTimeout),
 			middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
+			middleware.WithIPBlocklist(services.SystemService),
 			middleware.WithGeminiKeyAuth(services.AuthService),
 			middleware.WithSource(request.SourceAPI),
 			middleware.WithThread(server.Config.Trace, services.ThreadService),
@@ -245,6 +264,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		geminiAliasGroup := server.Group("/v1beta",
 			middleware.WithTimeout(server.Config.LLMRequestTimeout),
 			middleware.MaxRequestBodyBytes(server.Config.MaxRequestBodyBytes),
+			middleware.WithIPBlocklist(services.SystemService),
 			middleware.WithGeminiKeyAuth(services.AuthService),
 			middleware.WithSource(request.SourceAPI),
 			middleware.WithThread(server.Config.Trace, services.ThreadService),

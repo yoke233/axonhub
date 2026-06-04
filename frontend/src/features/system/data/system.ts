@@ -5,6 +5,7 @@ import { getTokenFromStorage } from '@/stores/authStore';
 import i18n from '@/lib/i18n';
 import { useErrorHandler } from '@/hooks/use-error-handler';
 import type { ProxyConfig } from '@/features/channels/data/schema';
+import type { ModelAssociation } from '@/features/models/data/schema';
 
 // GraphQL queries and mutations
 const SYSTEM_VERSION_QUERY = `
@@ -56,6 +57,7 @@ const BRAND_SETTINGS_QUERY = `
     brandSettings {
       brandName
       brandLogo
+      title
     }
   }
 `;
@@ -97,6 +99,10 @@ const RETRY_POLICY_QUERY = `
       loadBalancerStrategy
       enabled
       emptyResponseDetection
+      upstreamErrorPolicy {
+        mode
+        customMessage
+      }
       autoDisableChannel {
         enabled
         statuses {
@@ -196,8 +202,19 @@ const COMPLETE_AUTO_DISABLE_CHANNEL_ONBOARDING_MUTATION = `
 `;
 
 const TRIGGER_GC_CLEANUP_MUTATION = `
-  mutation triggerGcCleanup {
-    triggerGcCleanup
+  mutation triggerGcCleanup($input: TriggerGcCleanupInput!) {
+    triggerGcCleanup(input: $input)
+  }
+`;
+
+const PREVIEW_GC_CLEANUP_QUERY = `
+  query previewGcCleanup($input: TriggerGcCleanupInput!) {
+    previewGcCleanup(input: $input) {
+      resourceType
+      estimatedCount
+      cutoffTime
+      retentionDays
+    }
   }
 `;
 
@@ -205,6 +222,7 @@ const TRIGGER_GC_CLEANUP_MUTATION = `
 export interface BrandSettings {
   brandName?: string;
   brandLogo?: string;
+  title?: string;
 }
 
 export interface SystemGeneralSettings {
@@ -231,6 +249,14 @@ export interface UpdateVideoStorageSettingsInput {
   scanLimit?: number;
 }
 
+export interface SecuritySettings {
+  blockedIPs: string[];
+}
+
+export interface UpdateSecuritySettingsInput {
+  blockedIPs?: string[];
+}
+
 export interface StoragePolicy {
   storeChunks: boolean;
   livePreview: boolean;
@@ -248,6 +274,7 @@ export interface CleanupOption {
 export interface UpdateBrandSettingsInput {
   brandName?: string;
   brandLogo?: string;
+  title?: string;
 }
 
 export interface UpdateStoragePolicyInput {
@@ -262,6 +289,18 @@ export interface CleanupOptionInput {
   resourceType: string;
   enabled: boolean;
   cleanupDays: number;
+}
+
+export interface TriggerGcCleanupInput {
+  requestsCleanupDays: number;
+  usageLogsCleanupDays: number;
+}
+
+export interface GcCleanupPreviewItem {
+  resourceType: string;
+  estimatedCount: number;
+  cutoffTime: string;
+  retentionDays: number;
 }
 
 export interface AutoDisableChannelStatus {
@@ -307,6 +346,12 @@ export interface RetryPolicy {
   enabled: boolean;
   autoDisableChannel: AutoDisableChannel;
   emptyResponseDetection: boolean;
+  upstreamErrorPolicy: UpstreamErrorPolicy;
+}
+
+export interface UpstreamErrorPolicy {
+  mode: string;
+  customMessage: string;
 }
 
 export interface AutoDisableChannelStatusInput {
@@ -327,6 +372,7 @@ export interface RetryPolicyInput {
   enabled?: boolean;
   autoDisableChannel?: AutoDisableChannelInput;
   emptyResponseDetection?: boolean;
+  upstreamErrorPolicy?: Partial<UpstreamErrorPolicy>;
 }
 
 export interface UpdateDefaultDataStorageInput {
@@ -393,11 +439,12 @@ export interface ClearCachePayload {
 }
 
 // Hooks
-export function useBrandSettings() {
+export function useBrandSettings(options?: { enabled?: boolean }) {
   const { handleError } = useErrorHandler();
 
   return useQuery({
     queryKey: ['brandSettings'],
+    enabled: options?.enabled,
     queryFn: async () => {
       try {
         const data = await graphqlRequest<{ brandSettings: BrandSettings }>(BRAND_SETTINGS_QUERY);
@@ -465,8 +512,8 @@ export function useUpdateStoragePolicy() {
 
 export function useTriggerGcCleanup() {
   return useMutation({
-    mutationFn: async () => {
-      const data = await graphqlRequest<{ triggerGcCleanup: boolean }>(TRIGGER_GC_CLEANUP_MUTATION);
+    mutationFn: async (input: TriggerGcCleanupInput) => {
+      const data = await graphqlRequest<{ triggerGcCleanup: boolean }>(TRIGGER_GC_CLEANUP_MUTATION, { input });
       return data.triggerGcCleanup;
     },
     onSuccess: () => {
@@ -474,6 +521,15 @@ export function useTriggerGcCleanup() {
     },
     onError: () => {
       toast.error(i18n.t('system.storage.policy.runCleanupError'));
+    },
+  });
+}
+
+export function usePreviewGcCleanup() {
+  return useMutation({
+    mutationFn: async (input: TriggerGcCleanupInput) => {
+      const data = await graphqlRequest<{ previewGcCleanup: GcCleanupPreviewItem[] }>(PREVIEW_GC_CLEANUP_QUERY, { input });
+      return data.previewGcCleanup;
     },
   });
 }
@@ -739,6 +795,72 @@ const MODEL_SETTINGS_QUERY = `
       fallbackToChannelsOnModelNotFound
       queryAllChannelModels
       defaultModelAPIIncludeAll
+      autoReasoningEffort
+      modelBlacklistRegex
+      developerSettings {
+        developer
+        associations {
+          type
+          priority
+          disabled
+          when {
+            enabled
+            condition {
+              type
+              logic
+              field
+              operator
+              value
+              conditions {
+                type
+                logic
+                field
+                operator
+                value
+                conditions {
+                  type
+                  logic
+                  field
+                  operator
+                  value
+                }
+              }
+            }
+          }
+          channelModel {
+            channelId
+            modelId
+          }
+          channelRegex {
+            channelId
+            pattern
+          }
+          regex {
+            pattern
+            exclude {
+              channelNamePattern
+              channelIds
+              channelTags
+            }
+          }
+          modelId {
+            modelId
+            exclude {
+              channelNamePattern
+              channelIds
+              channelTags
+            }
+          }
+          channelTagsModel {
+            channelTags
+            modelId
+          }
+          channelTagsRegex {
+            channelTags
+            pattern
+          }
+        }
+      }
     }
   }
 `;
@@ -801,16 +923,41 @@ const UPDATE_VIDEO_STORAGE_SETTINGS_MUTATION = `
   }
 `;
 
+const SECURITY_SETTINGS_QUERY = `
+  query SecuritySettings {
+    securitySettings {
+      blockedIPs
+    }
+  }
+`;
+
+const UPDATE_SECURITY_SETTINGS_MUTATION = `
+  mutation UpdateSecuritySettings($input: UpdateSecuritySettingsInput!) {
+    updateSecuritySettings(input: $input)
+  }
+`;
+
 export interface ModelSettings {
   fallbackToChannelsOnModelNotFound: boolean;
   queryAllChannelModels: boolean;
   defaultModelAPIIncludeAll: boolean;
+  autoReasoningEffort: boolean;
+  modelBlacklistRegex: string;
+  developerSettings: DeveloperModelSettings[];
 }
 
 export interface UpdateModelSettingsInput {
   fallbackToChannelsOnModelNotFound?: boolean;
   queryAllChannelModels?: boolean;
   defaultModelAPIIncludeAll?: boolean;
+  autoReasoningEffort?: boolean;
+  modelBlacklistRegex?: string;
+  developerSettings?: DeveloperModelSettings[];
+}
+
+export interface DeveloperModelSettings {
+  developer: string;
+  associations: ModelAssociation[];
 }
 
 export function useModelSettings() {
@@ -840,6 +987,7 @@ export function useUpdateModelSettings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['modelSettings'] });
+      queryClient.invalidateQueries({ queryKey: ['models'] });
       toast.success(i18n.t('common.success.systemUpdated'));
     },
     onError: () => {
@@ -987,6 +1135,41 @@ export function useUpdateVideoStorageSettings() {
   });
 }
 
+export function useSecuritySettings() {
+  const { handleError } = useErrorHandler();
+
+  return useQuery({
+    queryKey: ['securitySettings'],
+    queryFn: async () => {
+      try {
+        const data = await graphqlRequest<{ securitySettings: SecuritySettings }>(SECURITY_SETTINGS_QUERY);
+        return data.securitySettings;
+      } catch (error) {
+        handleError(error, i18n.t('common.errors.internalServerError'));
+        throw error;
+      }
+    },
+  });
+}
+
+export function useUpdateSecuritySettings() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: UpdateSecuritySettingsInput) => {
+      const data = await graphqlRequest<{ updateSecuritySettings: boolean }>(UPDATE_SECURITY_SETTINGS_MUTATION, { input });
+      return data.updateSecuritySettings;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['securitySettings'] });
+      toast.success(i18n.t('common.success.systemUpdated'));
+    },
+    onError: () => {
+      toast.error(i18n.t('common.errors.systemUpdateFailed'));
+    },
+  });
+}
+
 // Backup and Restore
 const BACKUP_MUTATION = `
   mutation Backup($input: BackupOptionsInput!) {
@@ -1012,6 +1195,8 @@ export interface BackupOptionsInput {
   includeModelPrices: boolean;
   includeModels: boolean;
   includeAPIKeys: boolean;
+  includeUsageStats: boolean;
+  includeRequestLogs: boolean;
 }
 
 export interface BackupPayload {
@@ -1025,6 +1210,8 @@ export interface RestoreOptionsInput {
   includeModelPrices: boolean;
   includeModels: boolean;
   includeAPIKeys: boolean;
+  includeUsageStats: boolean;
+  includeRequestLogs: boolean;
   channelConflictStrategy: 'skip' | 'overwrite' | 'error';
   modelConflictStrategy: 'skip' | 'overwrite' | 'error';
   modelPriceConflictStrategy: 'skip' | 'overwrite' | 'error';
@@ -1121,6 +1308,8 @@ const AUTO_BACKUP_SETTINGS_QUERY = `
       includeModels
       includeAPIKeys
       includeModelPrices
+      includeUsageStats
+      includeRequestLogs
       retentionDays
       lastBackupAt
       lastBackupError
@@ -1153,6 +1342,8 @@ export interface AutoBackupSettings {
   includeModels: boolean;
   includeAPIKeys: boolean;
   includeModelPrices: boolean;
+  includeUsageStats: boolean;
+  includeRequestLogs: boolean;
   retentionDays: number;
   lastBackupAt?: string;
   lastBackupError?: string;
@@ -1166,6 +1357,8 @@ export interface UpdateAutoBackupSettingsInput {
   includeModels?: boolean;
   includeAPIKeys?: boolean;
   includeModelPrices?: boolean;
+  includeUsageStats?: boolean;
+  includeRequestLogs?: boolean;
   retentionDays?: number;
 }
 
@@ -1367,6 +1560,126 @@ export function useUpdateUserAgentPassThroughSettings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['userAgentPassThroughSettings'] });
+      toast.success(i18n.t('common.success.systemUpdated'));
+    },
+    onError: () => {
+      toast.error(i18n.t('common.errors.systemUpdateFailed'));
+    },
+  });
+}
+
+// Pass-Through Settings (request/response body pass-through)
+const PASS_THROUGH_SETTINGS_QUERY = `
+  query PassThroughSettings {
+    passThroughSettings {
+      enabled
+    }
+  }
+`;
+
+const UPDATE_PASS_THROUGH_SETTINGS_MUTATION = `
+  mutation UpdatePassThroughSettings($input: UpdatePassThroughSettingsInput!) {
+    updatePassThroughSettings(input: $input)
+  }
+`;
+
+export interface PassThroughSettings {
+  enabled: boolean;
+}
+
+export interface UpdatePassThroughSettingsInput {
+  enabled: boolean;
+}
+
+export function usePassThroughSettings() {
+  const { handleError } = useErrorHandler();
+
+  return useQuery({
+    queryKey: ['passThroughSettings'],
+    queryFn: async () => {
+      try {
+        const data = await graphqlRequest<{ passThroughSettings: PassThroughSettings }>(PASS_THROUGH_SETTINGS_QUERY);
+        return data.passThroughSettings;
+      } catch (error) {
+        handleError(error, i18n.t('common.errors.internalServerError'));
+        throw error;
+      }
+    },
+  });
+}
+
+export function useUpdatePassThroughSettings() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: UpdatePassThroughSettingsInput) => {
+      const data = await graphqlRequest<{ updatePassThroughSettings: boolean }>(UPDATE_PASS_THROUGH_SETTINGS_MUTATION, { input });
+      return data.updatePassThroughSettings;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['passThroughSettings'] });
+      toast.success(i18n.t('common.success.systemUpdated'));
+    },
+    onError: () => {
+      toast.error(i18n.t('common.errors.systemUpdateFailed'));
+    },
+  });
+}
+
+const QUOTA_ENFORCEMENT_SETTINGS_QUERY = `
+  query QuotaEnforcementSettings {
+    quotaEnforcementSettings {
+      enabled
+      mode
+    }
+  }
+`;
+
+const UPDATE_QUOTA_ENFORCEMENT_SETTINGS_MUTATION = `
+  mutation UpdateQuotaEnforcementSettings($input: UpdateQuotaEnforcementSettingsInput!) {
+    updateQuotaEnforcementSettings(input: $input)
+  }
+`;
+
+export type QuotaEnforcementMode = 'EXHAUSTED_ONLY' | 'DE_PRIORITIZE';
+
+export interface QuotaEnforcementSettings {
+  enabled: boolean;
+  mode: QuotaEnforcementMode;
+}
+
+export interface UpdateQuotaEnforcementSettingsInput {
+  enabled?: boolean;
+  mode?: QuotaEnforcementMode;
+}
+
+export function useQuotaEnforcementSettings() {
+  const { handleError } = useErrorHandler();
+
+  return useQuery({
+    queryKey: ['quotaEnforcementSettings'],
+    queryFn: async () => {
+      try {
+        const data = await graphqlRequest<{ quotaEnforcementSettings: QuotaEnforcementSettings }>(QUOTA_ENFORCEMENT_SETTINGS_QUERY);
+        return data.quotaEnforcementSettings;
+      } catch (error) {
+        handleError(error, i18n.t('common.errors.internalServerError'));
+        throw error;
+      }
+    },
+  });
+}
+
+export function useUpdateQuotaEnforcementSettings() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: UpdateQuotaEnforcementSettingsInput) => {
+      const data = await graphqlRequest<{ updateQuotaEnforcementSettings: boolean }>(UPDATE_QUOTA_ENFORCEMENT_SETTINGS_MUTATION, { input });
+      return data.updateQuotaEnforcementSettings;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['quotaEnforcementSettings'] });
       toast.success(i18n.t('common.success.systemUpdated'));
     },
     onError: () => {

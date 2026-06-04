@@ -25,12 +25,18 @@ var defaultRetryPolicy = RetryPolicy{
 	RetryDelayMs:            1000,
 	LoadBalancerStrategy:    "adaptive",
 	Enabled:                 true,
+	UpstreamErrorPolicy: UpstreamErrorPolicy{
+		Mode: UpstreamErrorModePassthrough,
+	},
 }
 
 var defaultModelSettings = SystemModelSettings{
 	FallbackToChannelsOnModelNotFound: true,
 	QueryAllChannelModels:             true,
 	DefaultModelAPIIncludeAll:         false,
+	AutoReasoningEffort:               false,
+	ModelBlacklistRegex:               "",
+	DeveloperSettings:                 []*DeveloperModelSettings{},
 }
 
 var defaultChannelSetting = SystemChannelSettings{
@@ -55,6 +61,8 @@ var defaultAutoBackupSettings = AutoBackupSettings{
 	IncludeModels:      true,
 	IncludeAPIKeys:     false,
 	IncludeModelPrices: true,
+	IncludeUsageStats:  false,
+	IncludeRequestLogs: false,
 	RetentionDays:      30,
 }
 
@@ -63,4 +71,13 @@ var defaultVideoStorageSettings = VideoStorageSettings{
 	DataStorageID:       0,
 	ScanIntervalMinutes: 1,
 	ScanLimit:           50,
+}
+
+var defaultQuotaEnforcementSettings = QuotaEnforcementSettings{
+	Enabled: false,
+	Mode:    QuotaEnforcementModeExhaustedOnly,
+}
+
+var defaultSecuritySettings = SecuritySettings{
+	BlockedIPs: []string{},
 }

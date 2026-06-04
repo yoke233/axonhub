@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"context"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
@@ -31,6 +33,10 @@ type PersistenceState struct {
 	RawRequest    *httpclient.Request
 	LlmRequest    *llm.Request
 
+	// OriginalRequestStream stores the client's original stream intent before any
+	// candidate-specific forcing to provider-side streaming happens.
+	OriginalRequestStream *bool
+
 	// Persistence state
 	Request     *ent.Request
 	RequestExec *ent.RequestExecution
@@ -52,6 +58,26 @@ type PersistenceState struct {
 	// versus a stream that completed successfully but the client disconnected
 	// immediately after receiving the last chunk.
 	StreamCompleted bool
+
+	// RawProviderResponse stores the raw provider response for non-stream response pass-through.
+	RawProviderResponse *httpclient.Response
+
+	// RawProviderRequest stores the actual outbound provider request for pass-through checks.
+	RawProviderRequest *httpclient.Request
+
+	// RawStreamCh receives raw provider stream events for stream response pass-through.
+	RawStreamCh chan *httpclient.StreamEvent
+
+	// RawStreamErrRef points to the current attempt's local error variable used by the
+	// captureRawProviderStream fan-out goroutine. Using a per-attempt pointer (instead of
+	// a single shared field) prevents data races when retries spawn a new goroutine before
+	// the previous one has exited.
+	RawStreamErrRef *error
+
+	// RawStreamCancel cancels the current attempt's fan-out goroutine started by
+	// captureRawProviderStream. Must be called in PrepareForRetry and NextChannel so the
+	// abandoned goroutine exits promptly and releases its upstream HTTP connection.
+	RawStreamCancel context.CancelFunc
 }
 
 func (s *PersistenceState) ReleaseRequestPayloads() {
@@ -95,7 +121,7 @@ func (s *PersistenceState) NeedsRawRequestBodyForPassThrough() bool {
 			continue
 		}
 
-		if candidate.Channel.Settings.PassThroughBody {
+		if candidate.Channel.Settings.PassThroughBody != nil && *candidate.Channel.Settings.PassThroughBody {
 			return true
 		}
 	}

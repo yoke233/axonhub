@@ -60,7 +60,7 @@ func (s *stubUnauthorizedRetryableTransformer) TransformResponse(ctx context.Con
 	return nil, errors.New("not implemented")
 }
 
-func (s *stubUnauthorizedRetryableTransformer) TransformStream(ctx context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
+func (s *stubUnauthorizedRetryableTransformer) TransformStream(ctx context.Context, _ *httpclient.Request, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -68,7 +68,7 @@ func (s *stubUnauthorizedRetryableTransformer) TransformError(ctx context.Contex
 	return nil
 }
 
-func (s *stubUnauthorizedRetryableTransformer) AggregateStreamChunks(ctx context.Context, chunks []*httpclient.StreamEvent) ([]byte, llm.ResponseMeta, error) {
+func (s *stubUnauthorizedRetryableTransformer) AggregateStreamChunks(ctx context.Context, _ *httpclient.Request, chunks []*httpclient.StreamEvent) ([]byte, llm.ResponseMeta, error) {
 	return nil, llm.ResponseMeta{}, errors.New("not implemented")
 }
 

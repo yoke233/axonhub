@@ -45,12 +45,28 @@ server:
     exposed_headers: []         # Exposed headers (env: AXONHUB_SERVER_CORS_EXPOSED_HEADERS)
     allow_credentials: true     # Allow credentials (env: AXONHUB_SERVER_CORS_ALLOW_CREDENTIALS)
     max_age: 1m                  # Max age for preflight cache in seconds (env: AXONHUB_SERVER_CORS_MAX_AGE)
+  api:
+    auth:
+      allow_no_auth: false       # Allow requests without API key (env: AXONHUB_SERVER_API_AUTH_ALLOW_NO_AUTH)
+      key_prefix: "ah"           # API key prefix (env: AXONHUB_SERVER_API_AUTH_KEY_PREFIX)
+                                 # Default: "ah"
+                                 # Examples: "sk" generates "sk-<64hex>", "myapp" generates "myapp-<64hex>"
 
 # Database configuration
 db:
   dialect: "sqlite3"            # Database dialect: sqlite3, postgres, mysql (env: AXONHUB_DB_DIALECT)
   dsn: "file:axonhub.db?cache=shared&_fk=1&_pragma=journal_mode(WAL)"  # Database connection string (env: AXONHUB_DB_DSN)
+  disable_auto_migration: false    # Disable auto-migration (env: AXONHUB_DB_DISABLE_AUTO_MIGRATION)
+  disable_sqlite_auto_wal: false # Disable auto-enabling WAL mode for SQLite (env: AXONHUB_DB_DISABLE_SQLITE_AUTO_WAL)
   debug: false                  # Enable database debug logging (env: AXONHUB_DB_DEBUG)
+  max_open_conns: 20            # Maximum open DB connections shared by the app (env: AXONHUB_DB_MAX_OPEN_CONNS)
+  max_idle_conns: 10            # Maximum idle DB connections kept in the pool (env: AXONHUB_DB_MAX_IDLE_CONNS)
+  conn_max_lifetime: "30m"      # Recycle DB connections before server/network timeouts (env: AXONHUB_DB_CONN_MAX_LIFETIME)
+  conn_max_idle_time: "10m"     # Close long-idle pooled connections (env: AXONHUB_DB_CONN_MAX_IDLE_TIME)
+  read_replica:                 # Optional read replica for read-write separation (env: AXONHUB_DB_READ_REPLICA_*)
+    read_dsn: ""                 #   Read replica DSN; leave empty to disable (env: AXONHUB_DB_READ_REPLICA_READ_DSN)
+    read_max_open_conns: 0      #   Max open connections for replica (env: AXONHUB_DB_READ_REPLICA_READ_MAX_OPEN_CONNS)
+    read_max_idle_conns: 0      #   Max idle connections for replica (env: AXONHUB_DB_READ_REPLICA_READ_MAX_IDLE_CONNS)
 
 # Cache configuration
 cache:
@@ -134,10 +150,13 @@ gc:
 
 # Provider Quota configuration
 provider_quota:
-  check_interval: "20m"          # Interval for checking provider quota status (env: AXONHUB_PROVIDER_QUOTA_CHECK_INTERVAL)
+  check_interval: "5m"          # Interval for checking provider quota status (env: AXONHUB_PROVIDER_QUOTA_CHECK_INTERVAL)
                                  # Supported values: 1m, 2m, 3m, 4m, 5m, 6m, 10m, 12m, 15m, 20m, 30m, 1h, 2h, etc.
-                                 # Default: 20m
+                                 # Default: 5m
                                  # Longer intervals reduce API calls but show less fresh quota data
+  warning_check_interval_ratio: 4 # Ratio for reduced warning-state check interval (env: AXONHUB_PROVIDER_QUOTA_WARNING_CHECK_INTERVAL_RATIO)
+                                 # Warning channels are checked at check_interval / ratio
+                                 # Default: 4 (warning channels checked every 20m with 5m base interval)
 
 # Environment Variable Examples:
 # export AXONHUB_SERVER_PORT=8080

@@ -10,6 +10,21 @@ import (
 	"github.com/looplj/axonhub/llm/oauth"
 )
 
+// ChannelEndpoint represents an outbound API endpoint configuration within a Channel.
+// Each endpoint specifies the upstream API format and an optional custom path override.
+// Within a single channel, api_format must be unique.
+type ChannelEndpoint struct {
+	APIFormat string `json:"api_format"`
+	Path      string `json:"path,omitempty"`
+	BaseURL   string `json:"base_url,omitempty"`
+	Transport string `json:"transport,omitempty"`
+}
+
+const (
+	ChannelEndpointTransportHTTP      = "http"
+	ChannelEndpointTransportWebSocket = "websocket"
+)
+
 type (
 	ProxyType   = httpclient.ProxyType
 	ProxyConfig = httpclient.ProxyConfig
@@ -30,10 +45,13 @@ type HeaderEntry struct {
 
 // Override operation types.
 const (
-	OverrideOpSet    = "set"
-	OverrideOpDelete = "delete"
-	OverrideOpRename = "rename"
-	OverrideOpCopy   = "copy"
+	OverrideOpSet          = "set"
+	OverrideOpDelete       = "delete"
+	OverrideOpRename       = "rename"
+	OverrideOpCopy         = "copy"
+	OverrideOpArrayAppend  = "array_append"
+	OverrideOpArrayPrepend = "array_prepend"
+	OverrideOpArrayInsert  = "array_insert"
 )
 
 // OverrideOperation defines a structured override operation for request body/header manipulation.
@@ -44,6 +62,13 @@ type OverrideOperation struct {
 	To        string `json:"to,omitempty"`
 	Value     string `json:"value,omitempty"`
 	Condition string `json:"condition,omitempty"`
+	// Index is the target position for array_insert. Only used by array_insert.
+	// Negative values count from the end (-1 = before last). Out-of-range values are clamped to [0, len].
+	Index *int `json:"index,omitempty"`
+	// Splat controls whether a JSON-array value is spread into the target array
+	// (true: each element inserted individually) or inserted as a single nested element (false).
+	// Only meaningful for array_append, array_prepend, and array_insert. Defaults to true.
+	Splat *bool `json:"splat,omitempty"`
 }
 
 func HeaderEntriesToOverrideOperations(headers []HeaderEntry) []OverrideOperation {
@@ -103,6 +128,12 @@ type ChannelSettings struct {
 	// When enabled, only the original model names (from field) will be exposed, not the mapped model names (to field).
 	HideMappedModels bool `json:"hideMappedModels"`
 
+	// LowercaseModelID converts model name matching keys to lowercase.
+	// When enabled, only RequestModel (used for matching) is lowercased; ActualModel
+	// (sent to provider) preserves original casing. This enables cross-channel load
+	// balancing where providers use different casing for the same model.
+	LowercaseModelID bool `json:"lowercaseModelId"`
+
 	// OverrideParameters sets the channel override the request body.
 	// A json string.
 	// e.g. {"max_tokens": 100}, {"temperature": 0.7}
@@ -135,9 +166,12 @@ type ChannelSettings struct {
 	PassThroughUserAgent *bool `json:"passThroughUserAgent,omitempty"`
 
 	// PassThroughBody controls whether to forward the original request body directly
-	// to the upstream provider without re-serialization.
+	// to the upstream provider and the raw provider response/stream directly to the client
+	// without re-serialization through the transform pipelines.
 	// Only effective when the inbound and outbound API formats are identical.
-	PassThroughBody bool `json:"passThroughBody,omitempty"`
+	// When set to nil, it inherits from the global system setting.
+	// When set to true/false, it overrides the global setting.
+	PassThroughBody *bool `json:"passThroughBody,omitempty"`
 
 	// RateLimit configures the upstream rate limit for the channel.
 	// When configured, the load balancer will skip channels that have exceeded their rate limits.
@@ -153,10 +187,24 @@ type ChannelSettings struct {
 }
 
 type ChannelRateLimit struct {
-	RPM             *int64 `json:"rpm,omitempty"`             // Requests Per Minute, nil = unlimited
-	TPM             *int64 `json:"tpm,omitempty"`             // Tokens Per Minute, nil = unlimited
-	MaxConcurrent   *int64 `json:"maxConcurrent,omitempty"`   // Maximum concurrent requests, nil = unlimited
-	DailyTokenLimit *int64 `json:"dailyTokenLimit,omitempty"` // Daily token budget (UTC day rolling), nil = unlimited. Useful for rationing subscription accounts (e.g. codex, claude code) to stay below upstream usage caps and avoid suspensions.
+	RPM           *int64 `json:"rpm,omitempty"`           // Requests Per Minute, nil = unlimited
+	TPM           *int64 `json:"tpm,omitempty"`           // Tokens Per Minute, nil = unlimited
+	MaxConcurrent *int64 `json:"maxConcurrent,omitempty"` // Maximum concurrent requests, nil = unlimited
+	// DailyTokenLimit is a daily token budget (UTC day rolling), nil = unlimited.
+	// Useful for rationing subscription accounts (e.g. codex, claude code) to stay below upstream usage caps.
+	DailyTokenLimit *int64 `json:"dailyTokenLimit,omitempty"`
+
+	// QueueSize controls the limiter mode when MaxConcurrent is set:
+	//   nil / 0 = soft mode (count only, no blocking, no rejection — preserves PR #1322 scoring behaviour)
+	//   > 0     = hard mode (FIFO wait queue with bounded capacity; excess requests rejected)
+	// Has no effect when MaxConcurrent is unset or <= 0.
+	QueueSize *int64 `json:"queueSize,omitempty"`
+
+	// QueueTimeoutMs is the per-channel queue wait timeout in milliseconds.
+	//   nil / 0 = no per-channel timeout (only the request context bounds the wait)
+	//   > 0     = waiters that exceed this duration receive ErrChannelQueueTimeout
+	// Only meaningful in hard mode (QueueSize > 0).
+	QueueTimeoutMs *int64 `json:"queueTimeoutMs,omitempty"`
 }
 
 // DisabledAPIKey 记录被禁用的 API key 信息（敏感，按 credentials 同级保护）

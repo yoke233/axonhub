@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
@@ -12,6 +13,7 @@ import (
 	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/enttest"
+	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/objects"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
@@ -68,6 +70,28 @@ func TestChatCompletionOrchestrator_Process_MinuteQuotaExceeded(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
+	now := time.Now().UTC()
+	existingReq, err := client.Request.Create().
+		SetProjectID(project.ID).
+		SetAPIKeyID(apiKey.ID).
+		SetModelID("gpt-4").
+		SetFormat("openai/chat_completions").
+		SetStatus(request.StatusCompleted).
+		SetRequestBody(objects.JSONRawMessage([]byte(`{}`))).
+		SetCreatedAt(now.Add(-time.Second)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.UsageLog.Create().
+		SetRequestID(existingReq.ID).
+		SetAPIKeyID(apiKey.ID).
+		SetProjectID(project.ID).
+		SetChannelID(ch.ID).
+		SetModelID("gpt-4").
+		SetCreatedAt(now.Add(-time.Second)).
+		Save(ctx)
+	require.NoError(t, err)
+
 	mockResp := buildMockOpenAIResponse("chatcmpl-quota-1", "gpt-4", "ok", 10, 20)
 	executor := &mockExecutor{
 		response: &httpclient.Response{
@@ -88,17 +112,17 @@ func TestChatCompletionOrchestrator_Process_MinuteQuotaExceeded(t *testing.T) {
 	channelSelector := &staticChannelSelector{candidates: channelsToTestCandidates([]*biz.Channel{bizChannel}, "gpt-4")}
 
 	orchestrator := &ChatCompletionOrchestrator{
-		channelSelector:   channelSelector,
-		Inbound:           openai.NewInboundTransformer(),
-		RequestService:    requestService,
-		ChannelService:    channelService,
-		PromptProvider:    &stubPromptProvider{},
-		SystemService:     systemService,
-		UsageLogService:   usageLogService,
-		QuotaService:      quotaService,
-		PipelineFactory:   pipeline.NewFactory(executor),
-		ModelMapper:       NewModelMapper(),
-		connectionTracker: NewDefaultConnectionTracker(1024),
+		channelSelector:       channelSelector,
+		Inbound:               openai.NewInboundTransformer(),
+		RequestService:        requestService,
+		ChannelService:        channelService,
+		PromptProvider:        &stubPromptProvider{},
+		SystemService:         systemService,
+		UsageLogService:       usageLogService,
+		QuotaService:          quotaService,
+		PipelineFactory:       pipeline.NewFactory(executor),
+		ModelMapper:           NewModelMapper(),
+		channelLimiterManager: NewChannelLimiterManager(),
 		Middlewares: []pipeline.Middleware{
 			stream.EnsureUsage(),
 		},
@@ -107,12 +131,7 @@ func TestChatCompletionOrchestrator_Process_MinuteQuotaExceeded(t *testing.T) {
 	ctx = contexts.WithProjectID(ctx, project.ID)
 	ctx = contexts.WithAPIKey(ctx, apiKey)
 
-	httpRequest := buildTestRequest("gpt-4", "Hello!", false)
-
-	_, err = orchestrator.Process(ctx, httpRequest)
-	require.NoError(t, err)
-
-	_, err = orchestrator.Process(ctx, httpRequest)
+	_, err = orchestrator.Process(ctx, buildTestRequest("gpt-4", "Hello!", false))
 	require.Error(t, err)
 
 	var respErr *llm.ResponseError

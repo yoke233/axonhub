@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/samber/lo"
 
@@ -24,11 +25,12 @@ const (
 )
 
 // OutboundTransformer implements transformer.Outbound for Codex proxy.
-// It always talks to the Codex Responses upstream (SSE only) and adapts requests accordingly.
+// It always talks to the Codex Responses upstream and adapts requests accordingly.
 //
 //nolint:containedctx // It is used as a transformer.
 type OutboundTransformer struct {
-	tokens oauth.TokenGetter
+	tokens    oauth.TokenGetter
+	transport string
 
 	// installationID is the channel-scoped fallback used when the caller did not
 	// supply 'x-codex-installation-id'. Mirrors codex_cli_rs ~/.codex/installation_id.
@@ -38,6 +40,9 @@ type OutboundTransformer struct {
 	responsesOutbound *responses.OutboundTransformer
 	sessionIDCache    SessionIDCache
 	sessionIDScopeKey string
+
+	executorMu         sync.Mutex
+	webSocketExecutors map[pipeline.Executor]*responses.WebSocketExecutor
 }
 
 var (
@@ -50,6 +55,7 @@ type Params struct {
 	BaseURL         string
 	AccountIdentity string
 	SessionIDCache  SessionIDCache
+	Transport       string
 	// InstallationID is the channel-scoped fallback "device" UUID. Mirrors the value
 	// real codex_cli_rs reads from ~/.codex/installation_id and sends in both the
 	// 'x-codex-installation-id' header and body.client_metadata.
@@ -71,9 +77,9 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 	// The underlying responses outbound requires baseURL/apiKey. We only need its request body logic.
 	// Use a dummy config and then override URL/auth.
 	ro, err := responses.NewOutboundTransformerWithConfig(&responses.Config{
-		BaseURL:         baseURL,
-		APIKeyProvider:  auth.NewStaticKeyProvider("dummy"),
-		AccountIdentity: params.AccountIdentity,
+		BaseURL:        baseURL,
+		APIKeyProvider: auth.NewStaticKeyProvider("dummy"),
+		Transport:      params.Transport,
 	})
 	if err != nil {
 		return nil, err
@@ -81,6 +87,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 
 	return &OutboundTransformer{
 		tokens:            params.TokenProvider,
+		transport:         params.Transport,
 		installationID:    params.InstallationID,
 		responsesOutbound: ro,
 		sessionIDCache:    resolveSessionIDCache(params.SessionIDCache),
@@ -90,6 +97,14 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 
 func (t *OutboundTransformer) APIFormat() llm.APIFormat {
 	return llm.APIFormatOpenAIResponse
+}
+
+func (t *OutboundTransformer) TokenProvider() oauth.TokenGetter {
+	if t == nil {
+		return nil
+	}
+
+	return t.tokens
 }
 
 func (t *OutboundTransformer) TransformError(ctx context.Context, rawErr *httpclient.Error) *llm.ResponseError {
@@ -113,6 +128,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	rawOriginator := ""
 	rawUserAgent := ""
 	rawTurnMetadata := ""
+
 	var rawHeaders http.Header
 
 	if llmReq.RawRequest != nil && llmReq.RawRequest.Headers != nil {
@@ -142,7 +158,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	// For non-Codex callers we add Codex-compatible defaults. For requests that
 	// already look like real Codex clients, stay in passthrough-first mode.
 	if !isCodexCaller {
-		//nolint: exhaustive // We only care about compact requests.
+		//nolint:exhaustive // We only care about compact requests.
 		switch reqCopy.RequestType {
 		case llm.RequestTypeCompact:
 			if reqCopy.Stream == nil {
@@ -187,11 +203,18 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	)
 	reqCopy.PromptCacheKey = promptCacheKey
 
+	// Codex Responses rejects token limit fields and user metadata.
+	reqCopy.MaxCompletionTokens = nil
+	reqCopy.MaxTokens = nil
+	reqCopy.Metadata = nil
+
 	reqCopy.TransformOptions.ArrayInputs = lo.ToPtr(true)
+
 	hreq, err := t.responsesOutbound.TransformRequest(ctx, &reqCopy)
 	if err != nil {
 		return nil, err
 	}
+
 	keepPreviousResponseID := reqCopy.RequestType != llm.RequestTypeCompact && reqCopy.PreviousResponseID != nil
 	hreq.Body = sanitizeCodexRequestBody(hreq.Body, promptCacheKey != nil, keepPreviousResponseID)
 	if originalRequestType == llm.RequestTypeImage {
@@ -209,11 +232,13 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 	hreq.Headers.Set("Connection", "Keep-Alive")
 	hreq.Headers.Del("User-Agent")
+
 	if rawOriginator != "" {
 		hreq.Headers.Set("Originator", rawOriginator)
 	} else {
 		hreq.Headers.Set("Originator", DefaultOriginator)
 	}
+
 	// Passthrough-first: real codex CLI users already have a proper UA. Fall back to a
 	// codex_cli_rs-shaped UA only when the caller did not supply one. Avoid leaking the
 	// Go default UA "Go-http-client/1.1".
@@ -264,6 +289,7 @@ func resolveSessionIDScopeKey(accountIdentity string) string {
 
 	return accountIdentity
 }
+
 func (t *OutboundTransformer) TransformResponse(ctx context.Context, httpResp *httpclient.Response) (*llm.Response, error) {
 	// Codex upstream returns Responses API response.
 	resp, err := t.responsesOutbound.TransformResponse(ctx, httpResp)
@@ -277,18 +303,62 @@ func (t *OutboundTransformer) TransformResponse(ctx context.Context, httpResp *h
 	return resp, nil
 }
 
-func (t *OutboundTransformer) TransformStream(ctx context.Context, streamIn streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
-	return t.responsesOutbound.TransformStream(ctx, streamIn)
+func (t *OutboundTransformer) TransformStream(ctx context.Context, req *httpclient.Request, streamIn streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
+	return t.responsesOutbound.TransformStream(ctx, req, streamIn)
 }
 
-func (t *OutboundTransformer) AggregateStreamChunks(ctx context.Context, chunks []*httpclient.StreamEvent) ([]byte, llm.ResponseMeta, error) {
-	return t.responsesOutbound.AggregateStreamChunks(ctx, chunks)
+func (t *OutboundTransformer) AggregateStreamChunks(ctx context.Context, req *httpclient.Request, chunks []*httpclient.StreamEvent) ([]byte, llm.ResponseMeta, error) {
+	return t.responsesOutbound.AggregateStreamChunks(ctx, req, chunks)
 }
 
 func (t *OutboundTransformer) CustomizeExecutor(executor pipeline.Executor) pipeline.Executor {
+	inner := executor
+	if t != nil && t.transport == responses.TransportWebSocket {
+		inner = t.customizeWebSocketExecutor(inner)
+	}
+
 	return &codexExecutor{
-		inner:       executor,
+		inner:       inner,
 		transformer: t,
+	}
+}
+
+func (t *OutboundTransformer) customizeWebSocketExecutor(executor pipeline.Executor) pipeline.Executor {
+	if !responses.ExecutorComparable(executor) {
+		return responses.NewWebSocketExecutor(executor)
+	}
+
+	t.executorMu.Lock()
+	defer t.executorMu.Unlock()
+
+	if t.webSocketExecutors == nil {
+		t.webSocketExecutors = make(map[pipeline.Executor]*responses.WebSocketExecutor)
+	}
+	if cached, ok := t.webSocketExecutors[executor]; ok {
+		return cached
+	}
+
+	webSocketExecutor := responses.NewWebSocketExecutor(executor)
+	t.webSocketExecutors[executor] = webSocketExecutor
+
+	return webSocketExecutor
+}
+
+func (t *OutboundTransformer) Stop() {
+	if t == nil {
+		return
+	}
+
+	t.executorMu.Lock()
+	executors := make([]*responses.WebSocketExecutor, 0, len(t.webSocketExecutors))
+	for _, executor := range t.webSocketExecutors {
+		executors = append(executors, executor)
+	}
+	t.webSocketExecutors = nil
+	t.executorMu.Unlock()
+
+	for _, executor := range executors {
+		_ = executor.Close()
 	}
 }
 
@@ -301,6 +371,7 @@ func (e *codexExecutor) Do(ctx context.Context, request *httpclient.Request) (*h
 	if request.RequestType == string(llm.RequestTypeCompact) {
 		return e.inner.Do(ctx, request)
 	}
+
 	stream, err := e.inner.DoStream(ctx, request)
 	if err != nil {
 		return nil, err
@@ -311,6 +382,7 @@ func (e *codexExecutor) Do(ctx context.Context, request *httpclient.Request) (*h
 	}()
 
 	var chunks []*httpclient.StreamEvent
+
 	for stream.Next() {
 		ev := stream.Current()
 		if ev == nil {
@@ -327,8 +399,11 @@ func (e *codexExecutor) Do(ctx context.Context, request *httpclient.Request) (*h
 	if err := stream.Err(); err != nil {
 		return nil, err
 	}
+	if err := responses.TopLevelWebSocketError(chunks); err != nil {
+		return nil, err
+	}
 
-	body, _, err := e.transformer.AggregateStreamChunks(ctx, chunks)
+	body, _, err := e.transformer.AggregateStreamChunks(ctx, request, chunks)
 	if err != nil {
 		return nil, err
 	}

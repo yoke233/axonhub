@@ -26,7 +26,10 @@ func (RequestExecution) Indexes() []ent.Index {
 		// Index for window function: find latest execution per request
 		index.Fields("request_id", "status", "created_at").
 			StorageKey("request_executions_by_request_id_status_created_at"),
-		index.Fields("channel_id").
+		// Index for ordering executions by created_at per request
+		index.Fields("request_id", "created_at").
+			StorageKey("request_executions_by_request_id_created_at"),
+		index.Fields("channel_id", "created_at").
 			StorageKey("request_executions_by_channel_id_created_at"),
 	}
 }
@@ -41,7 +44,9 @@ func (RequestExecution) Fields() []ent.Field {
 			Immutable().
 			Comment("Data Storage ID that this request belongs to"),
 		// External ID for tracking requests in external systems
-		field.String("external_id").Optional(),
+		field.String("external_id").
+			Optional().
+			MaxLen(512),
 		field.String("model_id").Immutable(),
 		//  The format of the request, e.g: openai/chat_completions, claude/messages, openai/response.
 		field.String("format").Immutable().Default("openai/chat_completions"),

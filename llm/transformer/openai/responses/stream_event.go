@@ -15,6 +15,7 @@ const (
 	StreamEventTypeResponseCompleted  StreamEventType = "response.completed"
 	StreamEventTypeResponseQueued     StreamEventType = "response.queued"
 	StreamEventTypeResponseFailed     StreamEventType = "response.failed"
+	StreamEventTypeResponseCancelled  StreamEventType = "response.cancelled"
 	StreamEventTypeResponseIncomplete StreamEventType = "response.incomplete"
 
 	// Output item events.
@@ -100,8 +101,8 @@ type StreamEvent struct {
 	PartialImageIndex *int   `json:"partial_image_index,omitempty"`
 
 	// For error events
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message,omitempty"`
+	Code    string  `json:"code,omitempty"`
+	Message string  `json:"message,omitempty"`
 	Param   *string `json:"param,omitempty"`
 }
 
@@ -111,6 +112,8 @@ type StreamEventContentPart struct {
 	Type string `json:"type"`
 	// The text of the part, for output_text.
 	Text *string `json:"text,omitempty"`
+	// The annotations of the output text part.
+	Annotations []Annotation `json:"annotations,omitzero"`
 	// The refusal reason, for refusal.
 	Refusal *string `json:"refusal,omitempty"`
 }

@@ -6,8 +6,8 @@ import (
 	"github.com/looplj/axonhub/llm"
 )
 
-// RequestFromLLM creates OpenAI Request from unified llm.Request.
-func RequestFromLLM(r *llm.Request) *Request {
+// RequestFromLLM creates OpenAI Request from unified llm.Request with reasoning field configuration.
+func RequestFromLLM(r *llm.Request, reasoningField ReasoningField) *Request {
 	if r == nil {
 		return nil
 	}
@@ -39,7 +39,7 @@ func RequestFromLLM(r *llm.Request) *Request {
 
 	// Convert messages
 	req.Messages = lo.Map(r.Messages, func(m llm.Message, _ int) Message {
-		return MessageFromLLM(m)
+		return MessageFromLLMWithConfig(m, reasoningField)
 	})
 
 	// Convert Stop
@@ -97,25 +97,52 @@ func RequestFromLLM(r *llm.Request) *Request {
 }
 
 // MessageFromLLM creates OpenAI Message from unified llm.Message.
+// Defaults to ReasoningFieldAll to preserve both reasoning fields.
 func MessageFromLLM(m llm.Message) Message {
+	return MessageFromLLMWithConfig(m, ReasoningFieldAll)
+}
+
+// MessageFromLLMWithConfig creates OpenAI Message from unified llm.Message with reasoning field configuration.
+func MessageFromLLMWithConfig(m llm.Message, reasoningField ReasoningField) Message {
 	var reasoningContent, reasoning *string
 
-	reasoningContent = m.ReasoningContent
+	// Apply reasoning field configuration
+	switch reasoningField {
+	case ReasoningFieldContent:
+		// Only use reasoning_content field
+		// Prefer ReasoningContent, fallback to Reasoning if ReasoningContent is nil
+		reasoningContent = m.ReasoningContent
+		if reasoningContent == nil && m.Reasoning != nil {
+			reasoningContent = m.Reasoning
+		}
+		reasoning = nil
+	case ReasoningFieldReasoning:
+		// Only use reasoning field
+		// Prefer Reasoning, fallback to ReasoningContent if Reasoning is nil
+		reasoning = m.Reasoning
+		if reasoning == nil && m.ReasoningContent != nil {
+			reasoning = m.ReasoningContent
+		}
+		reasoningContent = nil
+	case ReasoningFieldNone:
+		// Strip all reasoning fields
+		reasoningContent = nil
+		reasoning = nil
+	default: // ReasoningFieldAll
+		// Preserve both reasoning fields with sync logic
+		reasoningContent = m.ReasoningContent
+		reasoning = m.Reasoning
 
-	// Fallback: if ReasoningContent is empty but Reasoning has value, use Reasoning
-	if reasoningContent == nil && m.Reasoning != nil && *m.Reasoning != "" {
-		reasoningContent = m.Reasoning
+		// Sync: if one field has value and the other is nil/empty, copy the value
+		if reasoningContent == nil && reasoning != nil && *reasoning != "" {
+			reasoningContent = reasoning
+		}
+		if reasoning == nil && reasoningContent != nil && *reasoningContent != "" {
+			reasoning = reasoningContent
+		}
 	}
 
-	// Determine final reasoning value
-	reasoning = m.Reasoning
-
-	// Sync: if Reasoning is empty but ReasoningContent has value, use ReasoningContent
-	if reasoning == nil && reasoningContent != nil && *reasoningContent != "" {
-		reasoning = reasoningContent
-	}
-
-	// Build the Message with both fields determined
+	// Build the Message with determined fields
 	msg := Message{
 		Role:             m.Role,
 		Name:             m.Name,
@@ -157,7 +184,9 @@ func MessageFromLLM(m llm.Message) Message {
 // AnnotationFromLLM creates OpenAI Annotation from unified llm.Annotation.
 func AnnotationFromLLM(a llm.Annotation) Annotation {
 	annotation := Annotation{
-		Type: a.Type,
+		Type:       a.Type,
+		StartIndex: a.StartIndex,
+		EndIndex:   a.EndIndex,
 	}
 
 	if a.URLCitation != nil {
@@ -294,6 +323,7 @@ func (r *Response) ToLLMResponse() *llm.Response {
 		if resp.TransformerMetadata == nil {
 			resp.TransformerMetadata = make(map[string]any)
 		}
+
 		resp.TransformerMetadata[TransformerMetadataKeyCitations] = r.Citations
 	}
 

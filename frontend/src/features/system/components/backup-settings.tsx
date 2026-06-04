@@ -40,6 +40,8 @@ export function BackupSettings() {
     includeModelPrices: true,
     includeModels: true,
     includeAPIKeys: false,
+    includeUsageStats: true,
+    includeRequestLogs: false,
   });
 
   const [restoreOptions, setRestoreOptions] = useState<RestoreOptionsInput>({
@@ -47,6 +49,8 @@ export function BackupSettings() {
     includeModelPrices: true,
     includeModels: true,
     includeAPIKeys: false,
+    includeUsageStats: true,
+    includeRequestLogs: false,
     channelConflictStrategy: 'skip',
     modelConflictStrategy: 'skip',
     modelPriceConflictStrategy: 'skip',
@@ -63,6 +67,8 @@ export function BackupSettings() {
     includeModels: true,
     includeAPIKeys: false,
     includeModelPrices: true,
+    includeUsageStats: false,
+    includeRequestLogs: false,
     retentionDays: 0,
   });
 
@@ -77,6 +83,8 @@ export function BackupSettings() {
        autoBackupForm.includeModels !== autoBackupSettings.data.includeModels ||
        autoBackupForm.includeAPIKeys !== autoBackupSettings.data.includeAPIKeys ||
        autoBackupForm.includeModelPrices !== autoBackupSettings.data.includeModelPrices ||
+       autoBackupForm.includeUsageStats !== autoBackupSettings.data.includeUsageStats ||
+       autoBackupForm.includeRequestLogs !== autoBackupSettings.data.includeRequestLogs ||
        autoBackupForm.retentionDays !== autoBackupSettings.data.retentionDays
      );
    }, [autoBackupForm, autoBackupSettings.data]);
@@ -91,6 +99,8 @@ export function BackupSettings() {
         includeModels: autoBackupSettings.data.includeModels,
         includeAPIKeys: autoBackupSettings.data.includeAPIKeys,
         includeModelPrices: autoBackupSettings.data.includeModelPrices,
+        includeUsageStats: autoBackupSettings.data.includeUsageStats,
+        includeRequestLogs: autoBackupSettings.data.includeRequestLogs,
         retentionDays: autoBackupSettings.data.retentionDays,
       });
     }
@@ -121,6 +131,8 @@ export function BackupSettings() {
       includeModels: autoBackupForm.includeModels,
       includeAPIKeys: autoBackupForm.includeAPIKeys,
       includeModelPrices: autoBackupForm.includeModelPrices,
+      includeUsageStats: autoBackupForm.includeUsageStats,
+      includeRequestLogs: autoBackupForm.includeRequestLogs,
       retentionDays: autoBackupForm.retentionDays,
     });
   };
@@ -171,6 +183,22 @@ export function BackupSettings() {
                 id="include-apikeys"
                 checked={backupOptions.includeAPIKeys}
                 onCheckedChange={(checked) => setBackupOptions({ ...backupOptions, includeAPIKeys: checked })}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="include-usage-stats">{t('system.backup.includeUsageStats')}</Label>
+              <Switch
+                id="include-usage-stats"
+                checked={backupOptions.includeUsageStats}
+                onCheckedChange={(checked) => setBackupOptions({ ...backupOptions, includeUsageStats: checked })}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="include-request-logs">{t('system.backup.includeRequestLogs')}</Label>
+              <Switch
+                id="include-request-logs"
+                checked={backupOptions.includeRequestLogs}
+                onCheckedChange={(checked) => setBackupOptions({ ...backupOptions, includeRequestLogs: checked })}
               />
             </div>
           </div>
@@ -324,6 +352,28 @@ export function BackupSettings() {
                 </SelectContent>
               </Select>
             </div>
+            <div className="flex items-center gap-4">
+              <div className="flex flex-1 items-center justify-between">
+                <Label htmlFor="restore-include-usage-stats">{t('system.backup.includeUsageStats')}</Label>
+                <Switch
+                  id="restore-include-usage-stats"
+                  checked={restoreOptions.includeUsageStats}
+                  onCheckedChange={(checked) => setRestoreOptions({ ...restoreOptions, includeUsageStats: checked })}
+                  disabled={!selectedFile}
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <div className="flex flex-1 items-center justify-between">
+                <Label htmlFor="restore-include-request-logs">{t('system.backup.includeRequestLogs')}</Label>
+                <Switch
+                  id="restore-include-request-logs"
+                  checked={restoreOptions.includeRequestLogs}
+                  onCheckedChange={(checked) => setRestoreOptions({ ...restoreOptions, includeRequestLogs: checked })}
+                  disabled={!selectedFile}
+                />
+              </div>
+            </div>
           </div>
           <Button
             onClick={handleRestore}
@@ -442,6 +492,22 @@ export function BackupSettings() {
                 onCheckedChange={(checked) => setAutoBackupForm({ ...autoBackupForm, includeModelPrices: checked })}
               />
             </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="auto-include-usage-stats">{t('system.backup.includeUsageStats')}</Label>
+              <Switch
+                id="auto-include-usage-stats"
+                checked={autoBackupForm.includeUsageStats}
+                onCheckedChange={(checked) => setAutoBackupForm({ ...autoBackupForm, includeUsageStats: checked })}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="auto-include-request-logs">{t('system.backup.includeRequestLogs')}</Label>
+              <Switch
+                id="auto-include-request-logs"
+                checked={autoBackupForm.includeRequestLogs}
+                onCheckedChange={(checked) => setAutoBackupForm({ ...autoBackupForm, includeRequestLogs: checked })}
+              />
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -457,16 +523,25 @@ export function BackupSettings() {
             <p className="text-sm text-muted-foreground">{t('system.autoBackup.retentionDaysDescription')}</p>
           </div>
 
-          {autoBackupSettings.data?.lastBackupAt && (
+          {autoBackupSettings.data?.lastBackupAt && (() => {
+            const lastBackupDate = new Date(autoBackupSettings.data.lastBackupAt);
+            const timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const offsetMinutes = -lastBackupDate.getTimezoneOffset();
+            const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+            const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60).toString().padStart(2, '0');
+            const offsetMins = (Math.abs(offsetMinutes) % 60).toString().padStart(2, '0');
+            const offsetStr = `UTC${offsetSign}${offsetHours}:${offsetMins}`;
+            return (
             <div className="rounded-md bg-muted p-3 text-sm">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-green-500" />
                 <span>
-                  {t('system.autoBackup.lastBackup.time')}: {new Date(autoBackupSettings.data.lastBackupAt).toLocaleString()}
+                  {t('system.autoBackup.lastBackup.time')}: {lastBackupDate.toLocaleString()} ({timezoneName}, {offsetStr})
                 </span>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {autoBackupSettings.data?.lastBackupError && (
             <div className="flex items-start gap-2 rounded-md bg-red-50 p-3 text-sm text-red-800 dark:bg-red-900/20 dark:text-red-200">

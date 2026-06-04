@@ -91,6 +91,14 @@ func (r *mutationResolver) UpdateAutoBackupSettings(ctx context.Context, input U
 		settings.IncludeModelPrices = *input.IncludeModelPrices
 	}
 
+	if input.IncludeUsageStats != nil {
+		settings.IncludeUsageStats = *input.IncludeUsageStats
+	}
+
+	if input.IncludeRequestLogs != nil {
+		settings.IncludeRequestLogs = *input.IncludeRequestLogs
+	}
+
 	if input.RetentionDays != nil {
 		settings.RetentionDays = *input.RetentionDays
 	}
@@ -98,6 +106,8 @@ func (r *mutationResolver) UpdateAutoBackupSettings(ctx context.Context, input U
 	if err := r.systemService.SetAutoBackupSettings(ctx, *settings); err != nil {
 		return false, err
 	}
+
+	r.backupService.Reschedule(ctx, r.scheduler)
 
 	return true, nil
 }

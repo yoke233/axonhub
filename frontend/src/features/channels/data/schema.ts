@@ -10,6 +10,7 @@ export const apiFormatSchema = z.enum([
   'openai/embeddings',
   'anthropic/messages',
   'gemini/contents',
+  'gemini/embeddings',
   'aisdk/text',
   'aisdk/datastream',
   'jina/rerank',
@@ -19,10 +20,36 @@ export const apiFormatSchema = z.enum([
 
 export type ApiFormat = z.infer<typeof apiFormatSchema>;
 
+export const configurableChannelEndpointApiFormats = [
+  'openai/chat_completions',
+  'openai/responses',
+  'openai/image_generation',
+  'openai/image_edit',
+  'openai/image_variation',
+  'openai/embeddings',
+  'anthropic/messages',
+  'gemini/contents',
+  'gemini/embeddings',
+  'jina/rerank',
+  'jina/embeddings',
+] as const;
+
+export const configurableChannelEndpointApiFormatSchema = z.enum(configurableChannelEndpointApiFormats);
+
+// Channel Endpoint
+export const channelEndpointSchema = z.object({
+  apiFormat: z.string().min(1),
+  path: z.string().optional(),
+  baseURL: z.url('Invalid URL').optional().or(z.literal('')),
+  transport: z.enum(['http', 'websocket']).optional().or(z.literal('')),
+});
+export type ChannelEndpoint = z.infer<typeof channelEndpointSchema>;
+
 // Channel Types
 export const channelTypeSchema = z.enum([
   'openai',
   'openai_responses',
+  'atlascloud',
   'codex',
   'anthropic',
   'anthropic_aws',
@@ -33,6 +60,7 @@ export const channelTypeSchema = z.enum([
   'deepseek',
   'deepseek_anthropic',
   'deepinfra',
+  'qiniu',
   'doubao',
   'doubao_anthropic',
   'moonshot',
@@ -46,18 +74,23 @@ export const channelTypeSchema = z.enum([
   'openai_fake',
   'openrouter',
   'xiaomi',
+  'xiaomi_anthropic',
   'xai',
   'ppio',
   'siliconflow',
   'volcengine',
+  'volcengine_anthropic',
   'longcat',
   'longcat_anthropic',
   'minimax',
   'minimax_anthropic',
   'aihubmix',
+  'aihubmix_anthropic',
   'burncloud',
   'modelscope',
   'bailian',
+  'bailian_anthropic',
+  'moonshot_coding',
   'jina',
   'github',
   'github_copilot',
@@ -67,6 +100,7 @@ export const channelTypeSchema = z.enum([
   'nanogpt',
   'nanogpt_responses',
   'fireworks',
+  'opencode_go',
   'ollama',
 ]);
 export type ChannelType = z.infer<typeof channelTypeSchema>;
@@ -99,14 +133,16 @@ export type HeaderEntry = z.infer<typeof headerEntrySchema>;
 
 // Override Operation
 export const overrideOperationSchema = z.object({
-  op: z.enum(['set', 'delete', 'rename', 'copy']),
+  op: z.enum(['set', 'delete', 'rename', 'copy', 'array_append', 'array_prepend', 'array_insert']),
   path: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   value: z.any().optional(),
   condition: z.string().optional(),
-})
-export type OverrideOperation = z.infer<typeof overrideOperationSchema>
+  index: z.number().int().nullish(),
+  splat: z.boolean().nullish(),
+});
+export type OverrideOperation = z.infer<typeof overrideOperationSchema>;
 
 // Proxy Type
 export const proxyTypeSchema = z.enum(['disabled', 'environment', 'url']);
@@ -147,11 +183,23 @@ export type ChannelProbeData = z.infer<typeof channelProbeDataSchema>;
 
 // Channel Rate Limit
 export const channelRateLimitSchema = z.object({
-  rpm: z.number().int().positive().optional().nullable(),
-  tpm: z.number().int().positive().optional().nullable(),
-  maxConcurrent: z.number().int().positive().optional().nullable(),
+  rpm: z.number().int().nonnegative().optional().nullable(),
+  tpm: z.number().int().nonnegative().optional().nullable(),
+  maxConcurrent: z.number().int().nonnegative().optional().nullable(),
+  queueSize: z.number().int().nonnegative().optional().nullable(),
+  queueTimeoutMs: z.number().int().nonnegative().optional().nullable(),
 });
 export type ChannelRateLimit = z.infer<typeof channelRateLimitSchema>;
+
+// Live snapshot of the per-channel concurrency limiter.
+// Returned from the backend only when MaxConcurrent is configured.
+export const channelLimiterStatsSchema = z.object({
+  inFlight: z.number().int().nonnegative(),
+  waiting: z.number().int().nonnegative(),
+  capacity: z.number().int().nonnegative(),
+  queueSize: z.number().int().nonnegative(),
+});
+export type ChannelLimiterStats = z.infer<typeof channelLimiterStatsSchema>;
 
 // Channel Settings
 export const channelSettingsSchema = z.object({
@@ -160,12 +208,13 @@ export const channelSettingsSchema = z.object({
   autoTrimedModelPrefixes: z.array(z.string()).optional().nullable(),
   hideOriginalModels: z.boolean().optional(),
   hideMappedModels: z.boolean().optional(),
+  lowercaseModelId: z.boolean().optional(),
   bodyOverrideOperations: z.array(overrideOperationSchema).optional(),
   headerOverrideOperations: z.array(overrideOperationSchema).optional(),
   proxy: proxyConfigSchema.optional().nullable(),
   transformOptions: transformOptionsSchema.optional(),
   passThroughUserAgent: z.boolean().optional().nullable(),
-  passThroughBody: z.boolean().optional(),
+  passThroughBody: z.boolean().optional().nullable(),
   rateLimit: channelRateLimitSchema.optional().nullable(),
 });
 
@@ -238,8 +287,21 @@ export const channelSchema = z.object({
   errorMessage: z.string().optional().nullable(),
   remark: z.string().optional().nullable(),
   allModelEntries: z.array(channelModelEntrySchema).optional(),
+  liveLimiterStats: channelLimiterStatsSchema.optional().nullable(),
+  endpoints: z.array(channelEndpointSchema).optional().default([]).nullable(),
+  defaultEndpoints: z.array(channelEndpointSchema).optional().default([]).nullable(),
 });
 export type Channel = z.infer<typeof channelSchema>;
+
+// Simplified schema for saveChannelEndpoints mutation response
+export const channelEndpointsResponseSchema = z.object({
+  id: z.string(),
+  type: channelTypeSchema,
+  name: z.string(),
+  defaultEndpoints: z.array(channelEndpointSchema).optional().default([]).nullable(),
+  endpoints: z.array(channelEndpointSchema).optional().default([]).nullable(),
+});
+export type ChannelEndpointsResponse = z.infer<typeof channelEndpointsResponseSchema>;
 
 export const testAPIKeyResultSchema = z.object({
   keyPrefix: z.string(),
@@ -260,7 +322,7 @@ export const testChannelAPIKeysPayloadSchema = z.object({
 export type TestChannelAPIKeysPayload = z.infer<typeof testChannelAPIKeysPayloadSchema>;
 
 // Pricing Schemas
-export const pricingModeSchema = z.enum(['flat_fee', 'usage_per_unit', 'usage_tiered']);
+export const pricingModeSchema = z.enum(['flat_fee', 'usage_per_unit', 'usage_tiered', 'usage_volume']);
 export type PricingMode = z.infer<typeof pricingModeSchema>;
 
 export const priceItemCodeSchema = z.enum(['prompt_tokens', 'completion_tokens', 'prompt_cached_tokens', 'prompt_write_cached_tokens']);
@@ -316,11 +378,7 @@ export const saveChannelModelPriceInputSchema = z.object({
 });
 export type SaveChannelModelPriceInput = z.infer<typeof saveChannelModelPriceInputSchema>;
 // Helper function to validate OAuth credentials
-function validateOAuthCredentials(
-  type: string,
-  apiKey: string | undefined,
-  ctx: z.RefinementCtx
-) {
+function validateOAuthCredentials(type: string, apiKey: string | undefined, ctx: z.RefinementCtx) {
   if (!apiKey) return;
 
   // For GitHub Copilot, enforce JSON format
@@ -381,6 +439,7 @@ export const createChannelInputSchema = z
     remark: z.string().optional(),
     orderingWeight: z.number().int().optional(),
     settings: channelSettingsSchema.optional(),
+    endpoints: z.array(channelEndpointSchema).optional(),
     credentials: z.object({
       // apiKey is used for OAuth credentials (JSON string with access_token, refresh_token)
       apiKey: z.string().optional(),
@@ -396,7 +455,8 @@ export const createChannelInputSchema = z
     }),
   })
   .superRefine((data, ctx) => {
-    const isOAuthType = data.type === 'codex' || data.type === 'claudecode' || data.type === 'antigravity' || data.type === 'github_copilot';
+    const isOAuthType =
+      data.type === 'codex' || data.type === 'claudecode' || data.type === 'antigravity' || data.type === 'github_copilot';
     const hasApiKey = data.credentials.apiKey && data.credentials.apiKey.trim().length > 0;
     const hasApiKeys = data.credentials.apiKeys && data.credentials.apiKeys.some((k) => k.trim().length > 0);
 
@@ -466,6 +526,7 @@ export const updateChannelInputSchema = z
     settings: channelSettingsSchema.optional(),
     errorMessage: z.string().optional().nullable(),
     remark: z.string().optional().nullable(),
+    endpoints: z.array(channelEndpointSchema).optional(),
     credentials: z
       .object({
         // apiKey 用于 OAuth 凭据 (codex/claudecode/antigravity)，存储 JSON 字符串（含 access_token, refresh_token）
@@ -489,7 +550,8 @@ export const updateChannelInputSchema = z
 
     // For OAuth validation on updates: validate if type is OAuth, or if credentials.apiKey is provided
     // (which indicates OAuth credentials are being set)
-    const isOAuthType = effectiveType === 'codex' || effectiveType === 'claudecode' || effectiveType === 'antigravity' || effectiveType === 'github_copilot';
+    const isOAuthType =
+      effectiveType === 'codex' || effectiveType === 'claudecode' || effectiveType === 'antigravity' || effectiveType === 'github_copilot';
 
     // Derive type from parent context if not available
     let derivedType = effectiveType;
@@ -504,7 +566,7 @@ export const updateChannelInputSchema = z
     // If we have an OAuth key but no type, check if it looks like Copilot credentials
     const isCopilotKey = hasApiKey && data.credentials?.apiKey?.trim().startsWith('{');
 
-    if (isOAuthType || (derivedType === 'github_copilot') || isCopilotKey) {
+    if (isOAuthType || derivedType === 'github_copilot' || isCopilotKey) {
       if (isCopilotKey && !derivedType) {
         try {
           const parsed = JSON.parse(data.credentials.apiKey);
@@ -632,6 +694,7 @@ export const channelSummarySchema = z.object({
   baseURL: z.string(),
   orderingWeight: z.number(),
   tags: z.array(z.string()).optional().default([]).nullable(),
+  endpoints: z.array(channelEndpointSchema).optional().default([]).nullable(),
   allModelEntries: z.array(channelModelEntrySchema).optional().default([]),
 });
 export type ChannelSummary = z.infer<typeof channelSummarySchema>;
@@ -673,4 +736,6 @@ export type {
   UpdateChannelOverrideTemplateInput,
   ApplyChannelOverrideTemplateInput,
   ApplyChannelOverrideTemplatePayload,
+  ClearChannelOverrideTemplatesInput,
+  ClearChannelOverrideTemplatesPayload,
 } from './templates';

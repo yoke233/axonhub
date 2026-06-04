@@ -58,6 +58,8 @@ func TestPersistenceStateReleaseRawRequestBody(t *testing.T) {
 }
 
 func TestPersistenceStateNeedsRawRequestBodyForPassThrough(t *testing.T) {
+	passThroughBody := true
+
 	noPassThrough := &PersistenceState{
 		ChannelModelsCandidates: []*ChannelModelsCandidate{
 			{Channel: &biz.Channel{Channel: &ent.Channel{Settings: &objects.ChannelSettings{}}}},
@@ -67,7 +69,7 @@ func TestPersistenceStateNeedsRawRequestBodyForPassThrough(t *testing.T) {
 
 	withPassThrough := &PersistenceState{
 		ChannelModelsCandidates: []*ChannelModelsCandidate{
-			{Channel: &biz.Channel{Channel: &ent.Channel{Settings: &objects.ChannelSettings{PassThroughBody: true}}}},
+			{Channel: &biz.Channel{Channel: &ent.Channel{Settings: &objects.ChannelSettings{PassThroughBody: &passThroughBody}}}},
 		},
 	}
 	require.True(t, withPassThrough.NeedsRawRequestBodyForPassThrough())

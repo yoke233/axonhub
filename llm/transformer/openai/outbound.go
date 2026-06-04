@@ -28,6 +28,20 @@ const (
 	PlatformGoogle PlatformType = "google"
 )
 
+// ReasoningField specifies which reasoning field to use in outbound messages.
+type ReasoningField string
+
+const (
+	// ReasoningFieldContent uses reasoning_content field (DeepSeek, Gemini, etc).
+	ReasoningFieldContent ReasoningField = "reasoning_content"
+	// ReasoningFieldReasoning uses reasoning field (NanoGPT, OpenRouter).
+	ReasoningFieldReasoning ReasoningField = "reasoning"
+	// ReasoningFieldNone strips all reasoning fields (Fireworks, bailian, etc).
+	ReasoningFieldNone ReasoningField = "none"
+	// ReasoningFieldAll preserves both reasoning and reasoning_content fields (default).
+	ReasoningFieldAll ReasoningField = "all"
+)
+
 // Config holds all configuration for the OpenAI outbound transformer.
 type Config struct {
 	// Platform configuration
@@ -36,14 +50,22 @@ type Config struct {
 	// BaseURL is the base URL for the OpenAI API, required.
 	BaseURL string `json:"base_url,omitempty"`
 
-	AccountIdentity string `json:"account_identity,omitempty"`
-
 	// RawURL is whether to use raw URL for requests, default is false.
 	// If true, the request URL will be used as is, without appending the chat completions endpoint.
 	RawURL bool `json:"raw_url,omitempty"`
 
+	// EndpointPath is an optional custom path override for this endpoint.
+	// When set, it replaces the default API path (e.g., "/chat/completions").
+	// Must start with "/". Skips default version normalization when set.
+	EndpointPath string `json:"endpoint_path,omitempty"`
+
 	// APIKeyProvider provides API keys for authentication, required.
 	APIKeyProvider auth.APIKeyProvider `json:"-"`
+
+	// ReasoningField specifies which reasoning field to use in outbound messages.
+	// Use ReasoningFieldContent (default) for DeepSeek/Mimo/Gemini, ReasoningFieldReasoning for NanoGPT/OpenRouter,
+	// or ReasoningFieldNone to strip all reasoning fields.
+	ReasoningField ReasoningField `json:"reasoning_field,omitempty"`
 }
 
 // OutboundTransformer implements transformer.Outbound for OpenAI format.
@@ -78,7 +100,11 @@ func NewOutboundTransformerWithConfig(config *Config) (transformer.Outbound, err
 		config.RawURL = true
 		config.BaseURL = strings.TrimSuffix(config.BaseURL, "##")
 	} else if !config.RawURL {
-		config.BaseURL = transformer.NormalizeBaseURL(config.BaseURL, "v1")
+		if config.EndpointPath != "" {
+			config.BaseURL = transformer.NormalizeBaseURL(config.BaseURL, "")
+		} else {
+			config.BaseURL = transformer.NormalizeBaseURL(config.BaseURL, "v1")
+		}
 	}
 
 	return &OutboundTransformer{
@@ -148,8 +174,20 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
+	// Determine which reasoning field to use, default to ReasoningFieldContent.
+	// reasoning_content is the standard field used by most providers (OpenAI o-series,
+	// DeepSeek, Mimo, Gemini, etc.) to return chain-of-thought in responses, and some
+	// require it echoed back in assistant messages. Providers that don't support it
+	// safely ignore the field. Previously defaulted to ReasoningFieldNone to minimize
+	// payload, but this broke providers requiring echo-back (e.g., Mimo #1654).
+	// Channels that want to strip reasoning can explicitly set ReasoningFieldNone in config.
+	reasoningField := t.config.ReasoningField
+	if reasoningField == "" {
+		reasoningField = ReasoningFieldContent
+	}
+
 	// Convert to OpenAI Request format (this strips helper fields)
-	oaiReq := RequestFromLLM(llmReq)
+	oaiReq := RequestFromLLM(llmReq, reasoningField)
 	//nolint:exhaustive // Checked.
 	switch t.config.PlatformType {
 	case PlatformOpenAI:
@@ -163,10 +201,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	// Get API key from provider
 	apiKey := t.config.APIKeyProvider.Get(ctx)
-	scope := shared.TransportScope{
-		BaseURL:         t.config.BaseURL,
-		AccountIdentity: t.config.AccountIdentity,
-	}
 
 	// Prepare headers
 	headers := make(http.Header)
@@ -191,7 +225,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		Body:      body,
 		Auth:      authConfig,
 		APIFormat: string(llm.APIFormatOpenAIChatCompletion),
-		Metadata:  scope.Metadata(),
+		Metadata:  nil,
 	}, nil
 }
 
@@ -240,7 +274,7 @@ func (t *OutboundTransformer) TransformResponse(
 	return oaiResp.ToLLMResponse(), nil
 }
 
-func (t *OutboundTransformer) TransformStream(ctx context.Context, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
+func (t *OutboundTransformer) TransformStream(ctx context.Context, req *httpclient.Request, stream streams.Stream[*httpclient.StreamEvent]) (streams.Stream[*llm.Response], error) {
 	return streams.MapErr(stream, func(event *httpclient.StreamEvent) (*llm.Response, error) {
 		return t.TransformStreamChunk(ctx, event)
 	}), nil
@@ -309,6 +343,7 @@ func parseStreamErrorEvent(event *httpclient.StreamEvent) *llm.ResponseError {
 		if detail.Message == "" && errObj.Exists() {
 			detail.Message = errObj.String()
 		}
+
 		if detail.Message == "" {
 			detail.Message = "stream error"
 		}
@@ -356,6 +391,10 @@ func (t *OutboundTransformer) buildFullRequestURL(_ *llm.Request) (string, error
 		return t.config.BaseURL, nil
 	}
 
+	if t.config.EndpointPath != "" {
+		return t.config.BaseURL + t.config.EndpointPath, nil
+	}
+
 	return t.config.BaseURL + "/chat/completions", nil
 }
 
@@ -392,7 +431,7 @@ func (t *OutboundTransformer) GetConfig() *Config {
 }
 
 func (t *OutboundTransformer) AggregateStreamChunks(
-	ctx context.Context,
+	ctx context.Context, _ *httpclient.Request,
 	chunks []*httpclient.StreamEvent,
 ) ([]byte, llm.ResponseMeta, error) {
 	return AggregateStreamChunks(ctx, chunks, DefaultTransformChunk)

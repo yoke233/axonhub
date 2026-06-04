@@ -121,8 +121,12 @@ func (m *rateLimitTracking) OnOutboundLlmStream(ctx context.Context, stream stre
 //     a token that the ChatGPT backend has rejected (often a sign that the subscription
 //     was flagged for "API-style usage" — see provider_quota.codex_checker for context).
 func (m *rateLimitTracking) OnOutboundRawError(ctx context.Context, err error) {
-	// Safety check: outbound might be nil in edge cases
 	if m.outbound == nil {
+		return
+	}
+
+	// Local queue rejections never reached upstream — they must not trigger cooldown.
+	if isChannelQueueError(err) {
 		return
 	}
 

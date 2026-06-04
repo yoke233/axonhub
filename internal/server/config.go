@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Host        string        `conf:"host" yaml:"host" json:"host"`
 	Port        int           `conf:"port" yaml:"port" json:"port"`
+	PublicURL   string        `conf:"public_url" yaml:"public_url" json:"public_url"`
 	Name        string        `conf:"name" yaml:"name" json:"name"`
 	BasePath    string        `conf:"base_path" yaml:"base_path" json:"base_path"`
 	ReadTimeout time.Duration `conf:"read_timeout" yaml:"read_timeout" json:"read_timeout"`
@@ -60,5 +61,6 @@ type API struct {
 }
 
 type APIAuth struct {
-	AllowNoAuth bool `conf:"allow_no_auth" yaml:"allow_no_auth" json:"allow_no_auth"`
+	AllowNoAuth bool   `conf:"allow_no_auth" yaml:"allow_no_auth" json:"allow_no_auth"`
+	KeyPrefix   string `conf:"key_prefix" yaml:"key_prefix" json:"key_prefix"`
 }

@@ -49,6 +49,7 @@ func NewOutboundTransformerWithConfig(config *Config) (transformer.Outbound, err
 		PlatformType:   openai.PlatformOpenAI,
 		BaseURL:        config.BaseURL,
 		APIKeyProvider: config.APIKeyProvider,
+		ReasoningField: openai.ReasoningFieldContent,
 	}
 
 	base, err := openai.NewOutboundTransformerWithConfig(oaiConfig)
@@ -179,9 +180,10 @@ func isEmptyMessageContent(content llm.MessageContent) bool {
 // TransformStream applies Bailian-specific streaming normalization on top of OpenAI-compatible stream.
 func (t *OutboundTransformer) TransformStream(
 	ctx context.Context,
+	req *httpclient.Request,
 	stream streams.Stream[*httpclient.StreamEvent],
 ) (streams.Stream[*llm.Response], error) {
-	baseStream, err := t.Outbound.TransformStream(ctx, stream)
+	baseStream, err := t.Outbound.TransformStream(ctx, req, stream)
 	if err != nil {
 		return nil, err
 	}

@@ -66,12 +66,14 @@ func TestItemMarshalJSON_ReasoningSummaryBehavior(t *testing.T) {
 			data, err := json.Marshal(tc.item)
 			require.NoError(t, err)
 			require.Contains(t, string(data), tc.expect)
+
 			if tc.notContains != "" {
 				require.NotContains(t, string(data), tc.notContains)
 			}
 
 			if tc.name == "summary preserves content" {
 				var parsed Item
+
 				err := json.Unmarshal(data, &parsed)
 				require.NoError(t, err)
 				require.Len(t, parsed.Summary, 1)
@@ -103,6 +105,7 @@ func TestItemMarshalJSON_Compaction(t *testing.T) {
 				require.Contains(t, string(data), `"created_by":"user_abc"`)
 
 				var parsed Item
+
 				err := json.Unmarshal(data, &parsed)
 				require.NoError(t, err)
 				require.Equal(t, "compaction", parsed.Type)
@@ -125,6 +128,7 @@ func TestItemMarshalJSON_Compaction(t *testing.T) {
 				require.Contains(t, string(data), `"encrypted_content":""`)
 
 				var parsed Item
+
 				err := json.Unmarshal(data, &parsed)
 				require.NoError(t, err)
 				require.Equal(t, "compaction", parsed.Type)
@@ -190,11 +194,35 @@ func TestItemUnmarshalJSON_Compaction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var item Item
+
 			err := json.Unmarshal([]byte(tc.json), &item)
 			require.NoError(t, err)
 			tc.validate(t, item)
 		})
 	}
+}
+
+func TestItemUnmarshalJSON_AcceptsObjectArguments(t *testing.T) {
+	var item Item
+	err := json.Unmarshal([]byte(`{
+		"type": "tool_search_call",
+		"call_id": "call_123",
+		"arguments": {"query":"image generation","limit":10}
+	}`), &item)
+	require.NoError(t, err)
+	require.Equal(t, "tool_search_call", item.Type)
+	require.Equal(t, `{"query":"image generation","limit":10}`, item.Arguments)
+}
+
+func TestItemUnmarshalJSON_AcceptsStringArguments(t *testing.T) {
+	var item Item
+	err := json.Unmarshal([]byte(`{
+		"type": "function_call",
+		"call_id": "call_123",
+		"arguments": "{\"location\":\"NYC\"}"
+	}`), &item)
+	require.NoError(t, err)
+	require.Equal(t, `{"location":"NYC"}`, item.Arguments)
 }
 
 func TestInputUnmarshalJSON_ClearsConflictingRepresentation(t *testing.T) {
@@ -241,4 +269,42 @@ func TestResponseToolChoiceUnmarshalJSON_ClearsConflictingRepresentation(t *test
 	require.Equal(t, "function", *choice.ObjectValue.Type)
 	require.NotNil(t, choice.ObjectValue.Name)
 	require.Equal(t, "get_weather", *choice.ObjectValue.Name)
+}
+
+func TestToolChoiceMarshalJSON_PreservesStringModes(t *testing.T) {
+	cases := []struct {
+		name     string
+		choice   ToolChoice
+		expected string
+	}{
+		{
+			name: "auto marshals as string",
+			choice: ToolChoice{
+				Mode: lo.ToPtr("auto"),
+			},
+			expected: `"auto"`,
+		},
+		{
+			name: "required marshals as string",
+			choice: ToolChoice{
+				Mode: lo.ToPtr("required"),
+			},
+			expected: `"required"`,
+		},
+		{
+			name: "none marshals as string",
+			choice: ToolChoice{
+				Mode: lo.ToPtr("none"),
+			},
+			expected: `"none"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(&tc.choice)
+			require.NoError(t, err)
+			require.JSONEq(t, tc.expected, string(data))
+		})
+	}
 }

@@ -18,10 +18,11 @@ AxonHub 使用 Go 模板 (Go templates) 进行动态值渲染。你可以在模�
 | `.Model` | 当前请求中的模型名称（可能经过了模型映射）。 | `{{.Model}}` |
 | `.ReasoningEffort` | `reasoning_effort` 的值 (none, low, medium, high)。 | `{{.ReasoningEffort}}` |
 | `.Metadata` | 请求中传递的自定义元数据 Map。 | `{{index .Metadata "user_id"}}` |
+| `.RequestHeader` | 过滤后的客户端入站请求头。支持规范写法/小写查找，并返回第一个值。 | `{{index .RequestHeader "X-Trace-Id"}}` |
 
 ## 重写操作类型
 
-AxonHub 支持以下四种重写操作：
+AxonHub 支持以下重写操作：
 
 | 操作类型 | 描述 | 适用场景 |
 | :--- | :--- | :--- |
@@ -29,6 +30,11 @@ AxonHub 支持以下四种重写操作：
 | `delete` | 删除指定字段 | 移除不需要的参数 |
 | `rename` | 重命名字段（从 `from` 移动到 `to`） | 字段名映射转换 |
 | `copy` | 复制字段值（从 `from` 复制到 `to`） | 参数复用 |
+| `array_append` | 把值追加到 `path` 数组的末尾 | 在原有数组内容之后注入 |
+| `array_prepend` | 把值追加到 `path` 数组的开头 | 在原有数组内容之前注入 |
+| `array_insert` | 把值插入到 `path` 数组的指定位置 | 在任意位置插入元素 |
+
+> 数组操作仅适用于请求体。请求头只支持 `set`、`delete`、`rename`、`copy`。
 
 ## 重写参数 (Override Parameters)
 
@@ -36,12 +42,14 @@ AxonHub 支持以下四种重写操作：
 
 | 字段 | 类型 | 必需 | 描述 |
 | :--- | :--- | :--- | :--- |
-| `op` | string | 是 | 操作类型：`set`、`delete`、`rename`、`copy` |
-| `path` | string | 条件 | 目标字段路径（`set` 和 `delete` 必需） |
+| `op` | string | 是 | 操作类型：`set`、`delete`、`rename`、`copy`、`array_append`、`array_prepend`、`array_insert` |
+| `path` | string | 条件 | 目标字段路径（`set`、`delete` 以及所有数组操作必需） |
 | `from` | string | 条件 | 源字段路径（`rename` 和 `copy` 必需） |
 | `to` | string | 条件 | 目标字段路径（`rename` 和 `copy` 必需） |
-| `value` | string | 条件 | 字段值（`set` 操作必需），支持模板 |
+| `value` | string | 条件 | 字段值（`set` 和所有数组操作必需），支持模板 |
 | `condition` | string | 否 | 条件表达式，结果为 `"true"` 时执行 |
+| `index` | number | 条件 | 插入位置（`array_insert` 必需），支持负数表示从末尾倒数；越界会被夹紧到 `[0, len]` |
+| `splat` | bool | 否 | 当渲染后的值是 JSON 数组时，是否将其元素展开插入到目标数组。默认 `true`。设为 `false` 则把整个数组作为单个嵌套元素插入。仅对数组操作生效。 |
 
 ### 基础示例
 
@@ -84,6 +92,11 @@ AxonHub 支持以下四种重写操作：
     "op": "set",
     "path": "user_context",
     "value": "user-{{index .Metadata \"user_id\"}}"
+  },
+  {
+    "op": "set",
+    "path": "trace_id",
+    "value": "{{index .RequestHeader \"x-trace-id\"}}"
   }
 ]
 ```
@@ -132,6 +145,80 @@ AxonHub 支持以下四种重写操作：
 ]
 ```
 
+### 数组操作
+
+数组操作允许你向已有数组（如 `system`、`messages`、`tools`）注入元素，**不会替换整个数组**。当你想保留客户端原有的内容、同时在前后插入网关侧的内容时，使用这些操作。
+
+**行为说明：**
+- 如果 `path` 不存在，会以提供的值创建一个新数组。
+- 如果 `path` 存在但不是数组，操作会被跳过并记录警告日志。
+- 如果渲染后的 `value` 是一个 JSON 数组，并且 `splat` 为 `true`（默认值），其中的元素会被展开插入到目标数组；将 `splat` 设为 `false` 可把整个数组作为单个嵌套元素插入。
+- 对 `array_insert`，`index` 支持负数（从末尾倒数）。`index = -1` 表示插入到最后一个元素之前。越界值会被夹紧到 `[0, len]`。
+
+**追加单个对象到末尾：**
+
+```json
+[
+  {
+    "op": "array_append",
+    "path": "messages",
+    "value": "{\"role\":\"system\",\"content\":\"appended note\"}"
+  }
+]
+```
+
+**在数组开头注入多个 system 项（保留用户原有内容）：**
+
+```json
+[
+  {
+    "op": "array_prepend",
+    "path": "system",
+    "value": "[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: ...\"},{\"type\":\"text\",\"text\":\"You are Claude Code...\",\"cache_control\":{\"type\":\"ephemeral\"}}]"
+  }
+]
+```
+
+假设原始请求是 `system: [{"type":"text","text":"<user>"}]`，最终结果：
+
+```json
+{
+  "system": [
+    {"type": "text", "text": "x-anthropic-billing-header: ..."},
+    {"type": "text", "text": "You are Claude Code...", "cache_control": {"type": "ephemeral"}},
+    {"type": "text", "text": "<user>"}
+  ]
+}
+```
+
+**插入到指定位置：**
+
+```json
+[
+  {
+    "op": "array_insert",
+    "path": "messages",
+    "index": 1,
+    "value": "{\"role\":\"system\",\"content\":\"inserted between message 0 and 1\"}"
+  }
+]
+```
+
+**把数组作为单个嵌套元素插入（关闭 splat）：**
+
+```json
+[
+  {
+    "op": "array_prepend",
+    "path": "tags",
+    "value": "[\"a\",\"b\"]",
+    "splat": false
+  }
+]
+```
+
+对 `{"tags": ["x"]}` 执行后结果为：`{"tags": [["a","b"], "x"]}`。
+
 ### 动态 JSON 对象
 
 如果渲染后的模板字符串是一个有效的 JSON 对象或数组，AxonHub 会自动解析它，并将其作为结构化的 JSON 对象插入，而不是作为字符串：
@@ -176,6 +263,11 @@ AxonHub 支持以下四种重写操作：
     "op": "set",
     "path": "X-User-ID",
     "value": "{{index .Metadata \"user_id\"}}"
+  },
+  {
+    "op": "set",
+    "path": "X-Trace-Id",
+    "value": "{{index .RequestHeader \"x-trace-id\"}}"
   },
   {
     "op": "delete",

@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/samber/lo"
 
@@ -91,7 +92,7 @@ func convertInstructionsFromMessages(msgs []llm.Message) string {
 // User messages become items with content array containing input_text items.
 // Assistant messages become items with type "message" and content array containing output_text items.
 // Tool calls become function_call items, tool results become function_call_output items.
-func convertInputFromMessages(msgs []llm.Message, transformOptions llm.TransformOptions, scope shared.TransportScope) Input {
+func convertInputFromMessages(msgs []llm.Message, transformOptions llm.TransformOptions) Input {
 	if len(msgs) == 0 {
 		return Input{}
 	}
@@ -113,7 +114,7 @@ func convertInputFromMessages(msgs []llm.Message, transformOptions llm.Transform
 		case "user", "developer":
 			items = append(items, convertUserMessage(msg))
 		case "assistant":
-			assistantItems := convertAssistantMessage(msg, scope)
+			assistantItems := convertAssistantMessage(msg)
 			items = append(items, assistantItems...)
 
 			// Record tool call types for later tool result encoding.
@@ -131,6 +132,7 @@ func convertInputFromMessages(msgs []llm.Message, transformOptions llm.Transform
 			}
 		case "tool":
 			itemType := "function_call_output"
+
 			if msg.ToolCallID != nil {
 				if mapped, ok := toolResultItemTypeByCallID[*msg.ToolCallID]; ok {
 					itemType = mapped
@@ -190,16 +192,18 @@ func convertUserMessage(msg llm.Message) Item {
 
 // convertAssistantMessage converts an assistant message to Responses API Item(s) format.
 // Returns multiple items if the message contains tool calls.
-func convertAssistantMessage(msg llm.Message, scope shared.TransportScope) []Item {
-	var items []Item
-	var toolCallItems []Item
+func convertAssistantMessage(msg llm.Message) []Item {
+	var (
+		items         []Item
+		toolCallItems []Item
+	)
 
 	// Handle reasoning content first.
 	// For Requests, reasoning is represented as an `input` item with type="reasoning".
 	// The Responses API uses the `summary` field to hold the reasoning summary text.
 	var encryptedContent *string
 	if msg.ReasoningSignature != nil {
-		encryptedContent = shared.DecodeOpenAIEncryptedContentInScope(msg.ReasoningSignature, scope)
+		encryptedContent = shared.DecodeOpenAIEncryptedContent(msg.ReasoningSignature)
 	}
 
 	if encryptedContent != nil {
@@ -238,10 +242,12 @@ func convertAssistantMessage(msg llm.Message, scope shared.TransportScope) []Ite
 	}
 
 	var contentItems []Item
+
 	flushMessage := func() {
 		if len(contentItems) == 0 {
 			return
 		}
+
 		items = append(items, Item{
 			Type:    "message",
 			Role:    msg.Role,
@@ -269,6 +275,7 @@ func convertAssistantMessage(msg llm.Message, scope shared.TransportScope) []Ite
 			case "compaction", "compaction_summary":
 				if p.Compact != nil {
 					flushMessage()
+
 					items = append(items, compactionItemFromPart(p, p.Type))
 				}
 			}
@@ -279,6 +286,7 @@ func convertAssistantMessage(msg llm.Message, scope shared.TransportScope) []Ite
 	// subsequent tool calls. Flush message segments before appending tool-call
 	// items so the encoded Responses item order matches that expectation.
 	flushMessage()
+
 	items = append(items, toolCallItems...)
 
 	return items
@@ -332,6 +340,39 @@ func convertImageGenerationToTool(src llm.Tool) Tool {
 	return tool
 }
 
+func convertWebSearchToTool(src llm.Tool) Tool {
+	tool := Tool{
+		Type: "web_search",
+	}
+
+	if src.WebSearch == nil {
+		return tool
+	}
+
+	if len(src.WebSearch.AllowedDomains) > 0 {
+		tool.Filters = &WebSearchFilters{
+			AllowedDomains: append([]string(nil), src.WebSearch.AllowedDomains...),
+		}
+	}
+
+	location := src.WebSearch.UserLocation
+	if location.Type != "" || location.City != "" || location.Country != "" || location.Region != "" || location.Timezone != "" {
+		locationType := location.Type
+		if locationType == "" {
+			locationType = "approximate"
+		}
+		tool.UserLocation = &WebSearchUserLocation{
+			Type:     locationType,
+			City:     location.City,
+			Country:  location.Country,
+			Region:   location.Region,
+			Timezone: location.Timezone,
+		}
+	}
+
+	return tool
+}
+
 // convertCustomToTool converts an llm.Tool custom tool to Responses API Tool format.
 func convertCustomToTool(src llm.Tool) Tool {
 	tool := Tool{
@@ -339,6 +380,7 @@ func convertCustomToTool(src llm.Tool) Tool {
 	}
 	if src.ResponseCustomTool != nil {
 		tool.Name = src.ResponseCustomTool.Name
+
 		tool.Description = src.ResponseCustomTool.Description
 		if src.ResponseCustomTool.Format != nil {
 			tool.Format = &CustomToolFormat{
@@ -401,11 +443,13 @@ func convertFunctionToTool(src llm.Tool) Tool {
 					for _, r := range required {
 						requiredSet[r] = true
 					}
+
 					for key := range props {
 						if !requiredSet[key] {
 							required = append(required, key)
 						}
 					}
+
 					params["required"] = required
 				}
 			}
@@ -484,30 +528,96 @@ func convertReasoning(req *llm.Request) *Reasoning {
 	return reasoning
 }
 
+func annotationToLLM(a Annotation, textRuneOffset int64) llm.Annotation {
+	annotation := llm.Annotation{
+		Type: a.Type,
+	}
+
+	if a.StartIndex != nil {
+		annotation.StartIndex = lo.ToPtr(*a.StartIndex + textRuneOffset)
+	}
+
+	if a.EndIndex != nil {
+		annotation.EndIndex = lo.ToPtr(*a.EndIndex + textRuneOffset)
+	}
+
+	if a.URLCitation != nil {
+		annotation.URLCitation = &llm.URLCitation{
+			URL:   a.URLCitation.URL,
+			Title: a.URLCitation.Title,
+		}
+	}
+
+	return annotation
+}
+
+func appendOutputText(textContent *strings.Builder, visibleTextRuneCount *int64, annotations []llm.Annotation, outputItem Item) []llm.Annotation {
+	if outputItem.Text == nil {
+		return annotations
+	}
+
+	textRuneOffset := *visibleTextRuneCount
+	textContent.WriteString(*outputItem.Text)
+	*visibleTextRuneCount += int64(utf8.RuneCountInString(*outputItem.Text))
+
+	if len(outputItem.Annotations) == 0 {
+		return annotations
+	}
+
+	for _, annotation := range outputItem.Annotations {
+		annotations = append(annotations, annotationToLLM(annotation, textRuneOffset))
+	}
+
+	return annotations
+}
+
+func appendResponseWebSearchCallMetadata(transformerMetadata map[string]any, outputItem Item) {
+	if transformerMetadata == nil || outputItem.Action == nil {
+		return
+	}
+
+	action := &WebSearchAction{
+		Type:  outputItem.Action.Type,
+		Query: outputItem.Action.Query,
+	}
+	if len(outputItem.Action.Queries) > 0 {
+		action.Queries = append([]string(nil), outputItem.Action.Queries...)
+	}
+	if len(outputItem.Action.Sources) > 0 {
+		action.Sources = append([]WebSearchSource(nil), outputItem.Action.Sources...)
+	}
+
+	call := Item{
+		ID:     outputItem.ID,
+		Type:   outputItem.Type,
+		Status: outputItem.Status,
+		Action: action,
+	}
+
+	existing, _ := transformerMetadata[responsesWebSearchCallsTransformerMetadataKey].([]Item)
+	transformerMetadata[responsesWebSearchCallsTransformerMetadataKey] = append(existing, call)
+}
+
 // convertOutputToMessage converts Responses API output items into an llm.Message.
 // It aggregates text, reasoning, tool calls, image generation,
 // compaction and compaction_summary items from the response output.
-func convertOutputToMessage(output []Item, scope shared.TransportScope, transformerMetadata map[string]any) llm.Message {
+func convertOutputToMessage(output []Item, transformerMetadata map[string]any) llm.Message {
 	var (
-		contentParts       []llm.MessageContentPart
-		textContent        strings.Builder
-		reasoningContent   strings.Builder
-		reasoningSignature *string
-		messageID          string
-		toolCalls          []llm.ToolCall
+		contentParts         []llm.MessageContentPart
+		textContent          strings.Builder
+		reasoningContent     strings.Builder
+		reasoningSignature   *string
+		messageID            string
+		toolCalls            []llm.ToolCall
+		annotations          []llm.Annotation
+		visibleTextRuneCount int64
 	)
-
-	appendText := func(text string) {
-		if text == "" {
-			return
-		}
-		textContent.WriteString(text)
-	}
 
 	flushText := func() {
 		if textContent.Len() == 0 {
 			return
 		}
+
 		contentParts = append(contentParts, llm.MessageContentPart{
 			Type: "text",
 			Text: lo.ToPtr(textContent.String()),
@@ -521,15 +631,17 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 			if messageID == "" {
 				messageID = outputItem.ID
 			}
-			for _, contentItem := range outputItem.GetContentItems() {
+
+			if outputItem.Content == nil {
+				continue
+			}
+			for _, contentItem := range outputItem.Content.Items {
 				if contentItem.Type == "output_text" {
-					appendText(contentItem.Text)
+					annotations = appendOutputText(&textContent, &visibleTextRuneCount, annotations, contentItem)
 				}
 			}
 		case "output_text":
-			if outputItem.Text != nil {
-				appendText(*outputItem.Text)
-			}
+			annotations = appendOutputText(&textContent, &visibleTextRuneCount, annotations, outputItem)
 		case "function_call":
 			toolCalls = append(toolCalls, llm.ToolCall{
 				ID:   outputItem.CallID,
@@ -544,6 +656,7 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 			if outputItem.Input != nil {
 				inputStr = *outputItem.Input
 			}
+
 			toolCalls = append(toolCalls, llm.ToolCall{
 				ID:   outputItem.CallID,
 				Type: llm.ToolTypeResponsesCustomTool,
@@ -557,17 +670,21 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 			for _, summary := range outputItem.Summary {
 				reasoningContent.WriteString(summary.Text)
 			}
+
 			if outputItem.EncryptedContent != nil && *outputItem.EncryptedContent != "" {
-				reasoningSignature = shared.EncodeOpenAIEncryptedContentInScope(outputItem.EncryptedContent, scope)
+				reasoningSignature = shared.EncodeOpenAIEncryptedContent(outputItem.EncryptedContent)
 			}
 		case "image_generation_call":
 			flushText()
+
 			imageOutputFormat := "png"
+
 			if transformerMetadata != nil {
 				if imgFmt, ok := transformerMetadata["image_output_format"].(string); ok && imgFmt != "" {
 					imageOutputFormat = imgFmt
 				}
 			}
+
 			if outputItem.Result != nil && *outputItem.Result != "" {
 				contentParts = append(contentParts, llm.MessageContentPart{
 					Type: "image_url",
@@ -582,12 +699,16 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 					},
 				})
 			}
+		case "web_search_call":
+			appendResponseWebSearchCallMetadata(transformerMetadata, outputItem)
 		case "compaction", "compaction_summary":
 			flushText()
+
 			encryptedContent := ""
 			if outputItem.EncryptedContent != nil {
 				encryptedContent = *outputItem.EncryptedContent
 			}
+
 			contentParts = append(contentParts, llm.MessageContentPart{
 				Type: outputItem.Type,
 				Compact: &llm.CompactContent{
@@ -598,6 +719,7 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 			})
 		case "input_image":
 			flushText()
+
 			if outputItem.ImageURL != nil && *outputItem.ImageURL != "" {
 				contentParts = append(contentParts, llm.MessageContentPart{
 					Type: "image_url",
@@ -612,9 +734,10 @@ func convertOutputToMessage(output []Item, scope shared.TransportScope, transfor
 	flushText()
 
 	msg := llm.Message{
-		ID:        messageID,
-		Role:      "assistant",
-		ToolCalls: toolCalls,
+		ID:          messageID,
+		Role:        "assistant",
+		ToolCalls:   toolCalls,
+		Annotations: annotations,
 	}
 
 	if reasoningContent.Len() > 0 {

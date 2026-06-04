@@ -11,8 +11,8 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 func TestNewInboundTransformer(t *testing.T) {
@@ -151,6 +151,43 @@ func TestInboundTransformer_TransformRequest(t *testing.T) {
 				require.Equal(t, "function", result.Tools[0].Type)
 				require.Equal(t, "get_weather", result.Tools[0].Function.Name)
 				require.Equal(t, "Get weather information", result.Tools[0].Function.Description)
+			},
+		},
+		{
+			name: "captures responses provider raw tools and tool choice",
+			httpReq: &httpclient.Request{
+				Body: []byte(`{
+					"model": "gpt-4o",
+					"input": "Search and run shell.",
+					"tools": [
+						{
+							"type": "tool_search",
+							"name": "search_docs",
+							"namespace": "docs"
+						},
+						{
+							"type": "function",
+							"name": "get_weather",
+							"parameters": {"type": "object", "properties": {}}
+						}
+					],
+					"tool_choice": {
+						"type": "tool_search",
+						"tools": [
+							{"type": "tool_search", "name": "search_docs"}
+						]
+					}
+				}`),
+			},
+			expectError: false,
+			validate: func(t *testing.T, result *llm.Request) {
+				require.Len(t, result.Tools, 1)
+				require.NotNil(t, result.ProviderExtensions)
+				require.NotNil(t, result.ProviderExtensions.OpenAIResponses)
+				require.NotNil(t, result.ProviderExtensions.OpenAIResponses.Request)
+				require.Len(t, result.ProviderExtensions.OpenAIResponses.Request.RawTools, 1)
+				require.JSONEq(t, `{"type":"tool_search","name":"search_docs","namespace":"docs"}`, string(result.ProviderExtensions.OpenAIResponses.Request.RawTools[0].Raw))
+				require.JSONEq(t, `{"type":"tool_search","tools":[{"type":"tool_search","name":"search_docs"}]}`, string(result.ProviderExtensions.OpenAIResponses.Request.RawToolChoice))
 			},
 		},
 		{
@@ -453,6 +490,173 @@ func TestInboundTransformer_TransformRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInboundTransformer_TransformRequest_PreservesWebSearchTools(t *testing.T) {
+	trans := NewInboundTransformer()
+
+	result, err := trans.TransformRequest(context.Background(), &httpclient.Request{
+		Body: []byte(`{
+			"model": "gpt-5.4",
+			"input": "Use web search.",
+			"tool_choice": "required",
+			"tools": [
+				{
+					"type": "web_search",
+					"filters": {
+						"allowed_domains": ["example.com"]
+					},
+					"user_location": {
+						"city": "San Francisco",
+						"country": "US"
+					}
+				}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Tools, 1)
+	tool := result.Tools[0]
+	require.Equal(t, llm.ToolTypeWebSearch, tool.Type)
+	require.NotNil(t, tool.WebSearch)
+	require.Equal(t, []string{"example.com"}, tool.WebSearch.AllowedDomains)
+	require.Equal(t, "San Francisco", tool.WebSearch.UserLocation.City)
+	require.Equal(t, "US", tool.WebSearch.UserLocation.Country)
+	require.Equal(t, "approximate", tool.WebSearch.UserLocation.Type)
+}
+
+func TestInboundTransformer_TransformStream_AttachesAnnotationsToFirstTextItem(t *testing.T) {
+	trans := NewInboundTransformer()
+	stream, err := trans.TransformStream(t.Context(), streams.SliceStream([]*llm.Response{
+		{
+			ID:      "resp_stream_annotations",
+			Object:  "chat.completion.chunk",
+			Created: 1677652288,
+			Model:   "gpt-4o",
+			Choices: []llm.Choice{{
+				Delta: &llm.Message{
+					Role: "assistant",
+					Annotations: []llm.Annotation{{
+						Type:       "url_citation",
+						StartIndex: lo.ToPtr(int64(0)),
+						EndIndex:   lo.ToPtr(int64(5)),
+						URLCitation: &llm.URLCitation{
+							URL:   "https://example.com/stream",
+							Title: "Stream Example",
+						},
+					}},
+					Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+				},
+			}},
+		},
+		{
+			ID:      "resp_stream_annotations",
+			Object:  "chat.completion.chunk",
+			Created: 1677652288,
+			Model:   "gpt-4o",
+			Choices: []llm.Choice{{FinishReason: lo.ToPtr("stop")}},
+			Usage:   &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		},
+	}))
+	require.NoError(t, err)
+
+	events, err := streams.All(stream)
+	require.NoError(t, err)
+
+	var contentAdded *StreamEvent
+	var itemDone *StreamEvent
+	for _, raw := range events {
+		var ev StreamEvent
+		require.NoError(t, json.Unmarshal(raw.Data, &ev))
+		switch ev.Type {
+		case StreamEventTypeContentPartAdded:
+			contentAdded = &ev
+		case StreamEventTypeOutputItemDone:
+			if ev.Item != nil && ev.Item.Type == "message" {
+				itemDone = &ev
+			}
+		}
+	}
+
+	require.NotNil(t, contentAdded)
+	require.NotNil(t, contentAdded.Part)
+	require.Len(t, contentAdded.Part.Annotations, 1)
+	require.Equal(t, "url_citation", contentAdded.Part.Annotations[0].Type)
+	require.NotNil(t, itemDone)
+	require.NotNil(t, itemDone.Item)
+	require.NotNil(t, itemDone.Item.Content)
+	require.Len(t, itemDone.Item.Content.Items, 1)
+	require.Len(t, itemDone.Item.Content.Items[0].Annotations, 1)
+	require.Equal(t, "https://example.com/stream", itemDone.Item.Content.Items[0].Annotations[0].URLCitation.URL)
+}
+
+func TestInboundTransformer_TransformStream_AttachesAnnotationsFromChoiceMessageToFirstTextItem(t *testing.T) {
+	trans := NewInboundTransformer()
+	stream, err := trans.TransformStream(t.Context(), streams.SliceStream([]*llm.Response{
+		{
+			ID:      "resp_stream_message_annotations",
+			Object:  "chat.completion.chunk",
+			Created: 1677652288,
+			Model:   "gpt-4o",
+			Choices: []llm.Choice{{
+				Message: &llm.Message{
+					Annotations: []llm.Annotation{{
+						Type:       "url_citation",
+						StartIndex: lo.ToPtr(int64(0)),
+						EndIndex:   lo.ToPtr(int64(5)),
+						URLCitation: &llm.URLCitation{
+							URL:   "https://example.com/message-stream",
+							Title: "Message Stream Example",
+						},
+					}},
+				},
+				Delta: &llm.Message{
+					Role:    "assistant",
+					Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+				},
+			}},
+		},
+		{
+			ID:      "resp_stream_message_annotations",
+			Object:  "chat.completion.chunk",
+			Created: 1677652288,
+			Model:   "gpt-4o",
+			Choices: []llm.Choice{{FinishReason: lo.ToPtr("stop")}},
+			Usage:   &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		},
+	}))
+	require.NoError(t, err)
+
+	events, err := streams.All(stream)
+	require.NoError(t, err)
+
+	var contentAdded *StreamEvent
+	var itemDone *StreamEvent
+	for _, raw := range events {
+		var ev StreamEvent
+		require.NoError(t, json.Unmarshal(raw.Data, &ev))
+		switch ev.Type {
+		case StreamEventTypeContentPartAdded:
+			contentAdded = &ev
+		case StreamEventTypeOutputItemDone:
+			if ev.Item != nil && ev.Item.Type == "message" {
+				itemDone = &ev
+			}
+		}
+	}
+
+	require.NotNil(t, contentAdded)
+	require.NotNil(t, contentAdded.Part)
+	require.Len(t, contentAdded.Part.Annotations, 1)
+	require.Equal(t, "url_citation", contentAdded.Part.Annotations[0].Type)
+	require.Equal(t, "https://example.com/message-stream", contentAdded.Part.Annotations[0].URLCitation.URL)
+	require.NotNil(t, itemDone)
+	require.NotNil(t, itemDone.Item)
+	require.NotNil(t, itemDone.Item.Content)
+	require.Len(t, itemDone.Item.Content.Items, 1)
+	require.Len(t, itemDone.Item.Content.Items[0].Annotations, 1)
+	require.Equal(t, "https://example.com/message-stream", itemDone.Item.Content.Items[0].Annotations[0].URLCitation.URL)
 }
 
 func TestInboundTransformer_TransformResponse(t *testing.T) {
@@ -931,6 +1135,7 @@ func TestInboundTransformer_TransformResponse_WithCompactionContent(t *testing.T
 				require.Equal(t, http.StatusOK, result.StatusCode)
 
 				var resp Response
+
 				err := json.Unmarshal(result.Body, &resp)
 				require.NoError(t, err)
 				require.Equal(t, "response", resp.Object)
@@ -982,6 +1187,7 @@ func TestInboundTransformer_TransformResponse_WithCompactionContent(t *testing.T
 				require.Equal(t, http.StatusOK, result.StatusCode)
 
 				var resp Response
+
 				err := json.Unmarshal(result.Body, &resp)
 				require.NoError(t, err)
 
@@ -1339,7 +1545,7 @@ func TestConvertReasoningWithFollowing(t *testing.T) {
 					Summary: []ReasoningSummary{
 						{Type: "summary_text", Text: "Reasoning summary"},
 					},
-					EncryptedContent: lo.ToPtr(shared.OpenAIEncryptedContentPrefix + "encrypted_data_here"),
+					EncryptedContent: lo.ToPtr("encrypted_data_here"),
 				},
 			},
 			startIdx: 0,
@@ -1351,7 +1557,7 @@ func TestConvertReasoningWithFollowing(t *testing.T) {
 				require.NotNil(t, result.ReasoningContent)
 				require.Equal(t, "Reasoning summary", *result.ReasoningContent)
 				require.NotNil(t, result.ReasoningSignature)
-				require.Equal(t, shared.OpenAIEncryptedContentPrefix+"encrypted_data_here", *result.ReasoningSignature)
+				require.Equal(t, "encrypted_data_here", *result.ReasoningSignature)
 			},
 		},
 		{
@@ -1587,7 +1793,48 @@ func TestInboundTransformer_TransformRequest_WithReasoningInput(t *testing.T) {
 	}
 }
 
-func TestInboundTransformer_TransformResponse_WithReasoning(t *testing.T) {
+func TestConvertToResponsesAPIResponse_AttachesAnnotationsToFirstTextItem(t *testing.T) {
+	resp := convertToResponsesAPIResponse(&llm.Response{
+		ID:      "resp_annotations",
+		Created: 1677652288,
+		Model:   "gpt-4o",
+		Choices: []llm.Choice{{
+			Message: &llm.Message{
+				ID:   "msg_annotations",
+				Role: "assistant",
+				Annotations: []llm.Annotation{
+					{
+						Type:       "url_citation",
+						StartIndex: lo.ToPtr(int64(0)),
+						EndIndex:   lo.ToPtr(int64(5)),
+						URLCitation: &llm.URLCitation{
+							URL:   "https://example.com",
+							Title: "Example",
+						},
+					},
+				},
+				Content: llm.MessageContent{
+					MultipleContent: []llm.MessageContentPart{
+						{Type: "text", Text: lo.ToPtr("Hello")},
+						{Type: "text", Text: lo.ToPtr(" world")},
+					},
+				},
+			},
+			FinishReason: lo.ToPtr("stop"),
+		}},
+	})
+
+	require.Len(t, resp.Output, 1)
+	require.NotNil(t, resp.Output[0].Content)
+	require.Len(t, resp.Output[0].Content.Items, 2)
+	require.Len(t, resp.Output[0].Content.Items[0].Annotations, 1)
+	require.Empty(t, resp.Output[0].Content.Items[1].Annotations)
+	require.Equal(t, "url_citation", resp.Output[0].Content.Items[0].Annotations[0].Type)
+	require.NotNil(t, resp.Output[0].Content.Items[0].Annotations[0].URLCitation)
+	require.Equal(t, "https://example.com", resp.Output[0].Content.Items[0].Annotations[0].URLCitation.URL)
+}
+
+func TestInboundTransformer_TransformResponse_WithReasoningContent(t *testing.T) {
 	trans := NewInboundTransformer()
 
 	tests := []struct {
@@ -1609,7 +1856,7 @@ func TestInboundTransformer_TransformResponse_WithReasoning(t *testing.T) {
 						Message: &llm.Message{
 							Role:               "assistant",
 							ReasoningContent:   lo.ToPtr("I analyzed the problem step by step."),
-							ReasoningSignature: lo.ToPtr(shared.OpenAIEncryptedContentPrefix + "encrypted_data_here"),
+							ReasoningSignature: lo.ToPtr("encrypted_data_here"),
 							Content: llm.MessageContent{
 								Content: lo.ToPtr("The answer is 42."),
 							},
@@ -1645,12 +1892,12 @@ func TestInboundTransformer_TransformResponse_WithReasoning(t *testing.T) {
 				require.Equal(t, "reasoning", reasoningOutput.Type)
 				require.Len(t, reasoningOutput.Summary, 1)
 				require.Equal(t, "summary_text", reasoningOutput.Summary[0].Type)
-					require.Equal(t, "I analyzed the problem step by step.", reasoningOutput.Summary[0].Text)
-					require.NotNil(t, reasoningOutput.EncryptedContent)
-					require.Equal(t, shared.OpenAIEncryptedContentPrefix+"encrypted_data_here", *reasoningOutput.EncryptedContent)
+				require.Equal(t, "I analyzed the problem step by step.", reasoningOutput.Summary[0].Text)
+				require.NotNil(t, reasoningOutput.EncryptedContent)
+				require.Equal(t, "encrypted_data_here", *reasoningOutput.EncryptedContent)
 
-					// Second output should be message
-					messageOutput := resp.Output[1]
+				// Second output should be message
+				messageOutput := resp.Output[1]
 				require.Equal(t, "message", messageOutput.Type)
 				require.Equal(t, "assistant", messageOutput.Role)
 

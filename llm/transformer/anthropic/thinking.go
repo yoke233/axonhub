@@ -26,6 +26,28 @@ func isClaudeAdaptiveOnlyThinkingModel(model string) bool {
 		strings.HasPrefix(model, "claude-opus-4-8")
 }
 
+func isDeepSeekAnthropicOutputConfigModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "deepseek-")
+}
+
+// supportsOutputConfig returns true if the platform supports the output_config field
+// with effort control. DeepSeek supports output_config.effort but does NOT support
+// thinking.type = "adaptive".
+func supportsOutputConfig(config *Config) bool {
+	if config == nil {
+		return true
+	}
+
+	//nolint:exhaustive // Checked.
+	switch config.Type {
+	case PlatformDirect, PlatformClaudeCode, PlatformBedrock, PlatformVertex, PlatformDeepSeek:
+		return true
+	default:
+		return false
+	}
+}
+
 func applyDeepSeekV4Thinking(req *MessageRequest, chatReq *llm.Request) bool {
 	if req == nil || chatReq == nil {
 		return false
@@ -37,6 +59,10 @@ func applyDeepSeekV4Thinking(req *MessageRequest, chatReq *llm.Request) bool {
 	}
 
 	if control.Enabled {
+		if effort, ok := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string); ok && effort != "" {
+			control.Effort = effort
+		}
+
 		req.Thinking = &Thinking{Type: "enabled"}
 		req.OutputConfig = &OutputConfig{Effort: control.Effort}
 	} else {

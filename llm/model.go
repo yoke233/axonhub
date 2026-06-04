@@ -23,6 +23,20 @@ var (
 // Request is the unified llm request model for AxonHub, to keep compatibility with major app and framework.
 // It choose to base on the OpenAI chat completion request, but add some extra fields to support more features.
 // All the fields except `Embedding`, `Rerank`, and other helper fields is for chat type request.
+//
+// Common fields used by all request types (chat, completion, embedding, etc.):
+//   - Model: the model ID (required for all requests)
+//   - Stream: whether to stream the response
+//   - StreamOptions: options for streaming responses
+//   - User: end-user identifier for abuse detection
+//
+// Request-type-specific fields are stored in dedicated sub-structs:
+//   - Embedding: EmbeddingRequest for embedding requests
+//   - Rerank: RerankRequest for rerank requests
+//   - Image: ImageRequest for image generation requests
+//   - Video: VideoRequest for video generation requests
+//   - Compact: CompactRequest for compact requests
+//   - Completion: CompletionRequest for legacy completion requests
 type Request struct {
 	// Messages is a list of messages to send to the llm model.
 	Messages []Message `json:"messages" validator:"required,min=1"`
@@ -179,7 +193,12 @@ type Request struct {
 	// returned text will not contain the stop sequence.
 	Stop *Stop `json:"stop,omitempty"` // string or []string
 
-	Stream        *bool          `json:"stream,omitempty"`
+	// Stream indicates whether to stream the response.
+	// This is a common field used by all request types (chat, completion, etc.).
+	Stream *bool `json:"stream,omitempty"`
+
+	// StreamOptions specifies options for streaming responses.
+	// This is a common field used by all request types (chat, completion, etc.).
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 
 	// Static predicted output content, such as the content of a text file that is
@@ -224,6 +243,9 @@ type Request struct {
 	// Compact is the compact request, will be set if the request is compact request.
 	Compact *CompactRequest `json:"compact,omitempty"`
 
+	// Completion is the completion request, will be set if the request is completion request.
+	Completion *CompletionRequest `json:"completion,omitempty"`
+
 	// RawRequest is the raw request from the client.
 	RawRequest *httpclient.Request `json:"raw_request,omitempty"`
 
@@ -250,6 +272,10 @@ type Request struct {
 	// - "truncation": *string - truncation strategy ("auto", "disabled")
 	// - "include_obfuscation": *bool - whether to enable stream obfuscation (Responses API specific)
 	TransformerMetadata map[string]any `json:"transformer_metadata,omitempty"`
+
+	// ProviderExtensions stores provider/API-format private sidecar data.
+	// It is intentionally excluded from normal JSON output to avoid leaking raw prompts or tool outputs.
+	ProviderExtensions *ProviderExtensions `json:"-"`
 }
 
 type StreamOptions struct {
@@ -286,6 +312,7 @@ func (s *Stop) UnmarshalJSON(data []byte) error {
 	if err == nil {
 		s.Stop = &str
 		s.MultipleStop = nil
+
 		return nil
 	}
 
@@ -295,6 +322,7 @@ func (s *Stop) UnmarshalJSON(data []byte) error {
 	if err == nil {
 		s.Stop = nil
 		s.MultipleStop = strs
+
 		return nil
 	}
 
@@ -362,12 +390,50 @@ type Message struct {
 
 	// Copilot-only: X-Initiator quota tracking. Ignored by other providers.
 	Attribution string `json:"attribution,omitempty"`
+
+	// InlineToolResults carries assistant-inlined tool results (e.g. Anthropic
+	// *_tool_result blocks produced during a server-side tool turn). Downstream
+	// inbound transformers that can represent inline tool outputs (OpenAI
+	// Responses function_call_output, Anthropic *_tool_result content block)
+	// should emit them in place; others (OpenAI Chat Completions, plain text
+	// UIs) can safely drop the field.
+	InlineToolResults []InlineToolResult `json:"inline_tool_results,omitempty"`
+}
+
+// InlineToolResult represents a tool result that is emitted inline within the
+// assistant turn, rather than as a separate tool-role message. Used to carry
+// Anthropic server-side tool results (web_search_tool_result,
+// code_execution_tool_result, mcp_tool_result, ...) without losing the
+// information that is otherwise not representable in OpenAI Chat Completions
+// format. OpenAI Responses inbound transformers may render these as
+// `function_call_output` output items.
+type InlineToolResult struct {
+	// ToolCallID is the originating *_tool_use id this result corresponds to.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+
+	// Output is a best-effort text serialization of the tool result content,
+	// suitable for OpenAI Responses `function_call_output.output`.
+	Output string `json:"output,omitempty"`
+
+	// IsError indicates that the tool result represents an error.
+	IsError bool `json:"is_error,omitempty"`
+
+	// TransformerMetadata carries provider-specific fields. Anthropic uses:
+	//   anthropic_type                 — original block type (e.g.
+	//                                    "web_search_tool_result")
+	//   anthropic_caller               — raw JSON caller object (optional)
+	//   anthropic_tool_result_content  — raw JSON of the original content
+	TransformerMetadata map[string]any `json:"transformer_metadata,omitempty"`
 }
 
 // Annotation represents a citation or reference annotation in a message.
 type Annotation struct {
 	// Type is the type of annotation, e.g., "url_citation"
 	Type string `json:"type,omitempty"`
+	// StartIndex is the start Unicode code-point (rune) offset of the annotated span in the message content.
+	StartIndex *int64 `json:"start_index,omitempty"`
+	// EndIndex is the end Unicode code-point (rune) offset of the annotated span in the message content.
+	EndIndex *int64 `json:"end_index,omitempty"`
 	// URLCitation contains URL citation details when Type is "url_citation"
 	URLCitation *URLCitation `json:"url_citation,omitempty"`
 }
@@ -406,6 +472,7 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	if err == nil {
 		c.Content = &str
 		c.MultipleContent = nil
+
 		return nil
 	}
 
@@ -415,6 +482,7 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	if err == nil {
 		c.Content = nil
 		c.MultipleContent = parts
+
 		return nil
 	}
 
@@ -532,6 +600,21 @@ type ResponseFormat struct {
 // And other llm provider should convert the response to this format.
 // NOTE: the OpenAI stream and non-stream response reuse same struct.
 // All the fields except `Embedding`, `Rerank`, and other helper fields is for chat type request.
+//
+// Common fields used by all response types (chat, completion, embedding, etc.):
+//   - ID: the response identifier
+//   - Model: the model used to generate the response
+//   - Usage: token usage statistics (for all request types)
+//   - Object: the object type
+//   - Created: timestamp when the response was created
+//
+// Response-type-specific fields are stored in dedicated sub-structs:
+//   - Embedding: EmbeddingResponse for embedding responses
+//   - Rerank: RerankResponse for rerank responses
+//   - Image: ImageResponse for image generation responses
+//   - Video: VideoResponse for video generation responses
+//   - Compact: CompactResponse for compact responses
+//   - Completion: CompletionResponse for legacy completion responses
 type Response struct {
 	ID string `json:"id"`
 
@@ -552,7 +635,8 @@ type Response struct {
 	// The unique ID of the previous response for multi-turn Responses API responses.
 	PreviousResponseID *string `json:"previous_response_id,omitempty"`
 
-	// Usage is the unified token usage field for all request types (chat, embedding, rerank, image, video).
+	// Usage is the unified token usage field for all request types (chat, embedding, rerank, image, video, compact, completion).
+	// This is a common field used by all response types.
 	// For streaming chat requests, it will only be present in the last chunk when stream_options: {"include_usage": true} is set.
 	Usage *Usage `json:"usage,omitempty"`
 
@@ -583,6 +667,9 @@ type Response struct {
 
 	// Compact is the compact response, will present if the request is compact request.
 	Compact *CompactResponse `json:"compact,omitempty"`
+
+	// Completion is the completion response, will present if the request is completion request.
+	Completion *CompletionResponse `json:"completion,omitempty"`
 
 	// RequestType is the outbound request type from the llm service.
 	// e.g. the request from the chat/completions endpoint is in the chat type.
@@ -728,7 +815,7 @@ type ResponseError struct {
 func (e ResponseError) Error() string {
 	sb := strings.Builder{}
 	if e.StatusCode != 0 {
-		sb.WriteString(fmt.Sprintf("Request failed: %s, ", http.StatusText(e.StatusCode)))
+		fmt.Fprintf(&sb, "Request failed: %s, ", http.StatusText(e.StatusCode))
 	}
 
 	if e.Detail.Message != "" {

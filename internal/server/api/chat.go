@@ -17,6 +17,11 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 )
 
+const (
+	errTypeQuotaExhausted = "quota_exhausted"
+	errCodeQuotaExhausted = "quota_exhausted"
+)
+
 // StreamWriter is a function type for writing stream events to the response.
 type StreamWriter func(c *gin.Context, stream streams.Stream[*httpclient.StreamEvent])
 
@@ -63,7 +68,7 @@ func (handlers *ChatCompletionHandlers) ChatCompletion(c *gin.Context) {
 	if err != nil {
 		log.Error(ctx, "Error processing chat completion", log.Cause(err))
 
-		httpErr := handlers.ChatCompletionOrchestrator.Inbound.TransformError(ctx, err)
+		httpErr := transformOrchestratorError(ctx, err, handlers.ChatCompletionOrchestrator)
 		c.JSON(httpErr.StatusCode, json.RawMessage(httpErr.Body))
 
 		return
@@ -99,7 +104,7 @@ func (handlers *ChatCompletionHandlers) ChatCompletion(c *gin.Context) {
 			streamWriter = WriteSSEStream
 		}
 
-		streamWriter(c, result.ChatCompletionStream)
+		streamWriter(c, newUpstreamErrorStream(ctx, result.ChatCompletionStream, handlers.ChatCompletionOrchestrator.SystemService))
 	}
 }
 
@@ -166,6 +171,17 @@ func FormatStreamError(_ context.Context, err error) any {
 	errCode := ""
 	requestID := ""
 
+	var quotaErr *orchestrator.QuotaExhaustedError
+	if errors.As(err, &quotaErr) {
+		return gin.H{
+			"error": gin.H{
+				"message": quotaErr.Error(),
+				"type":    errTypeQuotaExhausted,
+				"code":    errCodeQuotaExhausted,
+			},
+		}
+	}
+
 	var respErr *llm.ResponseError
 	if errors.As(err, &respErr) {
 		if respErr.Detail.Type != "" {
@@ -208,4 +224,24 @@ func FormatStreamError(_ context.Context, err error) any {
 		},
 		"request_id": requestID,
 	}
+}
+
+func wrapQuotaExhaustedAsResponseError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var quotaErr *orchestrator.QuotaExhaustedError
+	if errors.As(err, &quotaErr) {
+		return &llm.ResponseError{
+			StatusCode: http.StatusServiceUnavailable,
+			Detail: llm.ErrorDetail{
+				Message: quotaErr.Error(),
+				Type:    errTypeQuotaExhausted,
+				Code:    errCodeQuotaExhausted,
+			},
+		}
+	}
+
+	return err
 }

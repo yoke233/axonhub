@@ -21,6 +21,7 @@ type SystemStatus {
 type BrandSettings {
   brandName: String
   brandLogo: String
+  title: String
 }
 
 type StoragePolicy {
@@ -40,6 +41,7 @@ type CleanupOption {
 input UpdateBrandSettingsInput {
   brandName: String
   brandLogo: String
+  title: String
 }
 
 input UpdateStoragePolicyInput {
@@ -124,6 +126,17 @@ type RetryPolicy {
   enabled: Boolean!
   autoDisableChannel: AutoDisableChannel!
   emptyResponseDetection: Boolean!
+  upstreamErrorPolicy: UpstreamErrorPolicy!
+}
+
+type UpstreamErrorPolicy {
+  mode: String!
+  customMessage: String!
+}
+
+input UpstreamErrorPolicyInput {
+  mode: String
+  customMessage: String
 }
 
 input AutoDisableChannelStatusInput {
@@ -144,18 +157,58 @@ input UpdateRetryPolicyInput {
   enabled: Boolean
   autoDisableChannel: AutoDisableChannelInput
   emptyResponseDetection: Boolean
+  upstreamErrorPolicy: UpstreamErrorPolicyInput
+}
+
+enum QuotaEnforcementMode {
+  EXHAUSTED_ONLY
+  DE_PRIORITIZE
+}
+
+type QuotaEnforcementSettings {
+  enabled: Boolean!
+  mode: QuotaEnforcementMode!
+}
+
+input UpdateQuotaEnforcementSettingsInput {
+  enabled: Boolean
+  mode: QuotaEnforcementMode
+}
+
+type SecuritySettings {
+  blockedIPs: [String!]!
+}
+
+input UpdateSecuritySettingsInput {
+  blockedIPs: [String!]
 }
 
 type SystemModelSettings {
   fallbackToChannelsOnModelNotFound: Boolean!
   queryAllChannelModels: Boolean!
   defaultModelAPIIncludeAll: Boolean!
+  autoReasoningEffort: Boolean!
+  modelBlacklistRegex: String!
+  developerSettings: [DeveloperModelSettings!]!
 }
 
 input UpdateSystemModelSettingsInput {
   fallbackToChannelsOnModelNotFound: Boolean
   queryAllChannelModels: Boolean
   defaultModelAPIIncludeAll: Boolean
+  autoReasoningEffort: Boolean
+  modelBlacklistRegex: String
+  developerSettings: [DeveloperModelSettingsInput!]
+}
+
+type DeveloperModelSettings {
+  developer: String!
+  associations: [ModelAssociation!]!
+}
+
+input DeveloperModelSettingsInput {
+  developer: String!
+  associations: [ModelAssociationInput!]!
 }
 
 input UpdateDefaultDataStorageInput {
@@ -263,6 +316,14 @@ input UpdateUserAgentPassThroughSettingsInput {
   enabled: Boolean!
 }
 
+type PassThroughSettings {
+  enabled: Boolean!
+}
+
+input UpdatePassThroughSettingsInput {
+  enabled: Boolean!
+}
+
 
 type ProxyPreset {
   name: String
@@ -278,6 +339,18 @@ input SaveProxyPresetInput {
   password: String
 }
 
+input TriggerGcCleanupInput {
+    requestsCleanupDays: Int!
+    usageLogsCleanupDays: Int!
+}
+
+type GcCleanupPreviewItem {
+    resourceType: String!
+    estimatedCount: Int!
+    cutoffTime: Time!
+    retentionDays: Int!
+}
+
 extend type Mutation {
   updateBrandSettings(input: UpdateBrandSettingsInput!): Boolean!
   updateStoragePolicy(input: UpdateStoragePolicyInput!): Boolean!
@@ -291,11 +364,18 @@ extend type Mutation {
   updateSystemChannelSettings(input: UpdateSystemChannelSettingsInput!): Boolean!
   updateSystemGeneralSettings(input: UpdateSystemGeneralSettingsInput!): Boolean!
   updateVideoStorageSettings(input: UpdateVideoStorageSettingsInput!): Boolean!
+  updateQuotaEnforcementSettings(input: UpdateQuotaEnforcementSettingsInput!): Boolean!
+  updateSecuritySettings(input: UpdateSecuritySettingsInput!): Boolean!
   checkProviderQuotas: Boolean!
-  triggerGcCleanup: Boolean!
+  triggerGcCleanup(input: TriggerGcCleanupInput!): Boolean!
   saveProxyPreset(input: SaveProxyPresetInput!): Boolean!
   deleteProxyPreset(url: String!): Boolean!
   updateUserAgentPassThroughSettings(input: UpdateUserAgentPassThroughSettingsInput!): Boolean!
+  updatePassThroughSettings(input: UpdatePassThroughSettingsInput!): Boolean!
+}
+
+extend type Query {
+  previewGcCleanup(input: TriggerGcCleanupInput!): [GcCleanupPreviewItem!]!
 }
 
 type SystemVersion {
@@ -352,8 +432,11 @@ extend type Query {
   systemChannelSettings: SystemChannelSettings!
   systemGeneralSettings: SystemGeneralSettings!
   videoStorageSettings: VideoStorageSettings!
+  quotaEnforcementSettings: QuotaEnforcementSettings!
+  securitySettings: SecuritySettings!
   proxyPresets: [ProxyPreset!]!
   userAgentPassThroughSettings: UserAgentPassThroughSettings!
+  passThroughSettings: PassThroughSettings!
   getCacheDiagnostics(input: GetCacheDiagnosticsInput): GetCacheDiagnosticsPayload!
 }
 

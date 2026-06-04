@@ -25,10 +25,13 @@ import {
   AiHubMix,
   Cerebras,
   Claude,
+  Qiniu,
   XiaomiMiMo,
   Fireworks,
-  Ollama
+  Ollama,
+  OpenCode,
 } from '@lobehub/icons';
+import { AtlasCloudIcon } from '../components/atlas-cloud-icon';
 import { NanoGPTIcon } from '../components/nanogpt-icon';
 import { CHANNEL_CONFIGS } from './config_channels';
 import { ApiFormat, ChannelType } from './schema';
@@ -42,7 +45,7 @@ export interface ProviderConfig {
 }
 
 /**
- * Provider configurations - groups channel types by provider/vendor
+ * Provider configurations - groups channel types by provider
  * Each provider can support multiple API formats (channel types)
  */
 export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
@@ -51,6 +54,12 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     icon: OpenAI,
     color: 'bg-white-100 text-white-800 border-white-200',
     channelTypes: ['openai', 'openai_responses'],
+  },
+  atlascloud: {
+    provider: 'atlascloud',
+    icon: AtlasCloudIcon,
+    color: 'bg-sky-100 text-sky-800 border-sky-200',
+    channelTypes: ['atlascloud'],
   },
   deepseek: {
     provider: 'deepseek',
@@ -74,7 +83,7 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     provider: 'moonshot',
     icon: Moonshot,
     color: 'bg-black-100 text-black-800 border-black-200',
-    channelTypes: ['moonshot_anthropic', 'moonshot'],
+    channelTypes: ['moonshot_anthropic', 'moonshot', 'moonshot_coding'],
   },
   zhipu: {
     provider: 'zhipu',
@@ -170,13 +179,13 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     provider: 'volcengine',
     icon: Volcengine,
     color: 'bg-blue-100 text-blue-800 border-blue-200',
-    channelTypes: ['volcengine'],
+    channelTypes: ['volcengine_anthropic', 'volcengine'],
   },
   aihubmix: {
     provider: 'aihubmix',
     icon: AiHubMix,
     color: 'bg-blue-100 text-blue-800 border-blue-200',
-    channelTypes: ['aihubmix'],
+    channelTypes: ['aihubmix_anthropic', 'aihubmix'],
   },
   modelscope: {
     provider: 'modelscope',
@@ -188,7 +197,7 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     provider: 'bailian',
     icon: Bailian,
     color: 'bg-green-100 text-green-800 border-green-200',
-    channelTypes: ['bailian'],
+    channelTypes: ['bailian', 'bailian_anthropic'],
   },
   openrouter: {
     provider: 'openrouter',
@@ -200,7 +209,7 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     provider: 'xiaomi',
     icon: XiaomiMiMo,
     color: 'bg-orange-100 text-orange-800 border-orange-200',
-    channelTypes: ['xiaomi'],
+    channelTypes: ['xiaomi_anthropic', 'xiaomi'],
   },
   vercel: {
     provider: 'vercel',
@@ -213,6 +222,12 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     icon: DeepInfra,
     color: 'bg-indigo-100 text-indigo-800 border-indigo-200',
     channelTypes: ['deepinfra'],
+  },
+  qiniu: {
+    provider: 'qiniu',
+    icon: Qiniu,
+    color: 'bg-blue-100 text-blue-800 border-blue-200',
+    channelTypes: ['qiniu'],
   },
   cerebras: {
     provider: 'cerebras',
@@ -231,6 +246,12 @@ export const PROVIDER_CONFIGS: Record<string, ProviderConfig> = {
     icon: Fireworks,
     color: 'bg-orange-100 text-orange-800 border-orange-200',
     channelTypes: ['fireworks'],
+  },
+  opencode_go: {
+    provider: 'opencode_go',
+    icon: OpenCode,
+    color: 'bg-indigo-100 text-indigo-800 border-indigo-200',
+    channelTypes: ['opencode_go'],
   },
   ollama: {
     provider: 'ollama',

@@ -3,7 +3,10 @@ package responses
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/samber/lo"
@@ -19,9 +22,10 @@ func (t *InboundTransformer) TransformStream(
 	stream streams.Stream[*llm.Response],
 ) (streams.Stream[*httpclient.StreamEvent], error) {
 	return &responsesInboundStream{
-		source:    stream,
-		ctx:       ctx,
-		toolCalls: make(map[int]*llm.ToolCall),
+		source:              stream,
+		ctx:                 ctx,
+		toolCalls:           make(map[int]*llm.ToolCall),
+		transformerMetadata: make(map[string]any),
 	}, nil
 }
 
@@ -41,6 +45,7 @@ type responsesInboundStream struct {
 	hasContentPartStarted   bool
 	hasFinished             bool
 	responseCompleted       bool
+	pendingAnnotations      []llm.Annotation
 
 	// Response metadata
 	responseID string
@@ -65,13 +70,18 @@ type responsesInboundStream struct {
 	toolCallOutputIndex map[int]int // Maps tool call index to output index
 
 	// Response accumulation using streamAggregator
-	usage      *llm.Usage
-	aggregator *streamAggregator
+	usage               *llm.Usage
+	aggregator          *streamAggregator
+	transformerMetadata map[string]any
 
 	// Event queue
 	eventQueue []*httpclient.StreamEvent
 	queueIndex int
 	err        error
+
+	// Error event tracking - when true, we've already emitted an error event
+	// to the client so Err() should return nil to avoid double error emission
+	errorEventEmitted bool
 }
 
 func (s *responsesInboundStream) enqueueEvent(ev *StreamEvent) error {
@@ -113,6 +123,27 @@ func (s *responsesInboundStream) Next() bool {
 
 	// Try to get the next chunk from source
 	if !s.source.Next() {
+		// Source stream ended - check if we need to emit an error event
+		if s.err == nil && !s.errorEventEmitted && s.source.Err() != nil {
+			sourceErr := s.source.Err()
+			// Don't emit error event for client cancellation
+			if errors.Is(sourceErr, context.Canceled) {
+				slog.DebugContext(s.ctx, "stream canceled by client")
+				return false
+			}
+			if errors.Is(sourceErr, context.DeadlineExceeded) {
+				slog.DebugContext(s.ctx, "stream deadline exceeded")
+				return false
+			}
+			// Emit an error event for upstream failures
+			if err := s.emitStreamErrorEvent(sourceErr); err != nil {
+				s.err = fmt.Errorf("failed to enqueue stream error event: %w", err)
+				return false
+			}
+
+			return s.Next()
+		}
+
 		return false
 	}
 
@@ -145,6 +176,10 @@ func (s *responsesInboundStream) Next() bool {
 		s.usage = chunk.Usage
 	}
 
+	if len(chunk.TransformerMetadata) > 0 {
+		s.mergeTransformerMetadata(chunk.TransformerMetadata)
+	}
+
 	// Generate response.created event if this is the first chunk
 	if !s.hasResponseCreated {
 		s.hasResponseCreated = true
@@ -161,7 +196,6 @@ func (s *responsesInboundStream) Next() bool {
 		if s.usage != nil {
 			response.Usage = ConvertLLMUsageToResponsesUsage(s.usage)
 		}
-
 		err := s.enqueueEvent(&StreamEvent{
 			Type:     StreamEventTypeResponseCreated,
 			Response: response,
@@ -202,7 +236,15 @@ func (s *responsesInboundStream) Next() bool {
 				s.err = err
 				return false
 			}
+
 			s.accumulatedReasoningSignature.WriteString(*choice.Delta.ReasoningSignature)
+		}
+
+		if choice.Message != nil && len(choice.Message.Annotations) > 0 {
+			s.pendingAnnotations = append(s.pendingAnnotations, choice.Message.Annotations...)
+		}
+		if choice.Delta != nil && len(choice.Delta.Annotations) > 0 {
+			s.pendingAnnotations = append(s.pendingAnnotations, choice.Delta.Annotations...)
 		}
 
 		// Handle text content delta
@@ -248,6 +290,9 @@ func (s *responsesInboundStream) Next() bool {
 		s.aggregator.status = "completed"
 		response := s.aggregator.buildResponse()
 		response.Usage = ConvertLLMUsageToResponsesUsage(s.usage)
+		if calls := getResponseWebSearchCallsFromMetadata(s.transformerMetadata); len(calls) > 0 {
+			response.Output = append(append([]Item(nil), calls...), response.Output...)
+		}
 
 		err := s.enqueueEvent(&StreamEvent{
 			Type:     StreamEventTypeResponseCompleted,
@@ -261,6 +306,18 @@ func (s *responsesInboundStream) Next() bool {
 
 	// Continue to the next event
 	return s.Next()
+}
+
+func (s *responsesInboundStream) mergeTransformerMetadata(metadata map[string]any) {
+	if len(metadata) == 0 {
+		return
+	}
+
+	if calls := getResponseWebSearchCallsFromMetadata(metadata); len(calls) > 0 {
+		existingCalls := getResponseWebSearchCallsFromMetadata(s.transformerMetadata)
+		mergedCalls := append(existingCalls, calls...)
+		s.transformerMetadata[responsesWebSearchCallsTransformerMetadataKey] = mergedCalls
+	}
 }
 
 func (s *responsesInboundStream) handleReasoningContent(content *string) error {
@@ -370,19 +427,26 @@ func (s *responsesInboundStream) handleTextContent(content *string) error {
 	if !s.hasContentPartStarted {
 		s.hasContentPartStarted = true
 
+		textPartItems, _ := attachAnnotationsToFirstTextItem([]Item{{
+			Type:        "output_text",
+			Annotations: []Annotation{},
+		}}, s.pendingAnnotations)
+
 		err := s.enqueueEvent(&StreamEvent{
 			Type:         StreamEventTypeContentPartAdded,
 			ItemID:       &s.currentItemID,
 			OutputIndex:  s.outputIndex,
 			ContentIndex: &s.contentIndex,
 			Part: &StreamEventContentPart{
-				Type: "output_text",
-				Text: lo.ToPtr(""),
+				Type:        "output_text",
+				Text:        lo.ToPtr(""),
+				Annotations: textPartItems[0].Annotations,
 			},
 		})
 		if err != nil {
 			return fmt.Errorf("failed to enqueue content_part.added event: %w", err)
 		}
+		// Keep pendingAnnotations until output_item.done so the final message item preserves them.
 	}
 
 	// Accumulate text content
@@ -613,10 +677,12 @@ func (s *responsesInboundStream) closeReasoningItem() error {
 			return fmt.Errorf("failed to enqueue reasoning_summary_part.done event: %w", err)
 		}
 	}
+
 	s.hasReasoningSummaryPart = false
 
 	// Emit output_item.done with complete reasoning item
 	var encryptedContent *string
+
 	if s.accumulatedReasoningSignature.Len() > 0 {
 		encoded := s.accumulatedReasoningSignature.String()
 		encryptedContent = lo.ToPtr(encoded)
@@ -682,6 +748,8 @@ func (s *responsesInboundStream) closeMessageItem() error {
 			}},
 		},
 	}
+	item.Content.Items, _ = attachAnnotationsToFirstTextItem(item.Content.Items, s.pendingAnnotations)
+	s.pendingAnnotations = nil
 
 	err := s.enqueueEvent(&StreamEvent{
 		Type:        StreamEventTypeOutputItemDone,
@@ -720,14 +788,21 @@ func (s *responsesInboundStream) closeCurrentContentPart() error {
 	}
 
 	// Emit content_part.done with full text
+	contentPartItems, _ := attachAnnotationsToFirstTextItem([]Item{{
+		Type:        "output_text",
+		Text:        lo.ToPtr(fullText),
+		Annotations: []Annotation{},
+	}}, s.pendingAnnotations)
+
 	err = s.enqueueEvent(&StreamEvent{
 		Type:         StreamEventTypeContentPartDone,
 		ItemID:       &s.currentItemID,
 		OutputIndex:  s.outputIndex,
 		ContentIndex: &s.contentIndex,
 		Part: &StreamEventContentPart{
-			Type: "output_text",
-			Text: lo.ToPtr(fullText),
+			Type:        "output_text",
+			Text:        lo.ToPtr(fullText),
+			Annotations: contentPartItems[0].Annotations,
 		},
 	})
 	if err != nil {
@@ -833,6 +908,96 @@ func (s *responsesInboundStream) closeCurrentOutputItem() error {
 	return nil
 }
 
+func (s *responsesInboundStream) emitStreamErrorEvent(err error) error {
+	code, message := classifyStreamError(err)
+
+	if s.hasResponseCreated {
+		response := s.buildFailedResponse(code, message)
+		if err := s.enqueueEvent(&StreamEvent{
+			Type:     StreamEventTypeResponseFailed,
+			Response: response,
+		}); err != nil {
+			return err
+		}
+	} else {
+		if err := s.enqueueEvent(&StreamEvent{
+			Type:    StreamEventTypeError,
+			Code:    code,
+			Message: message,
+		}); err != nil {
+			return err
+		}
+	}
+
+	s.errorEventEmitted = true
+
+	return nil
+}
+
+func classifyStreamError(err error) (code, message string) {
+	code = "stream_error"
+	message = err.Error()
+
+	if errors.Is(err, io.EOF) {
+		code = "upstream_eof"
+		message = "upstream connection closed unexpectedly"
+		return code, message
+	}
+
+	if errors.Is(err, context.Canceled) {
+		code = "client_cancel"
+		message = "client disconnected"
+		return code, message
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = "timeout"
+		message = "request timeout"
+		return code, message
+	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		code = "api_error"
+		message = string(httpErr.Body)
+		if message == "" {
+			message = httpErr.Status
+		}
+		return code, message
+	}
+
+	if errors.Is(err, ErrStreamIncomplete) {
+		code = "incomplete_stream"
+		message = "stream ended without terminal event"
+		return code, message
+	}
+
+	return code, message
+}
+
+func (s *responsesInboundStream) buildFailedResponse(code, message string) *Response {
+	response := &Response{
+		Object:    "response",
+		ID:        s.responseID,
+		Model:     s.model,
+		CreatedAt: s.createdAt,
+		Status:    lo.ToPtr("failed"),
+		Output:    []Item{},
+		Error: &Error{
+			Type:    "server_error",
+			Code:    code,
+			Message: message,
+		},
+	}
+
+	if s.aggregator != nil {
+		aggregated := s.aggregator.buildResponse()
+		response.Output = aggregated.Output
+	}
+
+	return response
+}
+
 func (s *responsesInboundStream) Current() *httpclient.StreamEvent {
 	if s.queueIndex < len(s.eventQueue) {
 		event := s.eventQueue[s.queueIndex]
@@ -845,6 +1010,12 @@ func (s *responsesInboundStream) Current() *httpclient.StreamEvent {
 }
 
 func (s *responsesInboundStream) Err() error {
+	// If we've already emitted an error event to the client, return nil
+	// to avoid double error emission by the SSE writer
+	if s.errorEventEmitted {
+		return nil
+	}
+
 	if s.err != nil {
 		return s.err
 	}

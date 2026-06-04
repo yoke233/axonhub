@@ -24,13 +24,15 @@ type ChannelsDialogType =
   | 'bulkTest'
   | 'bulkDelete'
   | 'bulkApplyTemplate'
+  | 'bulkClearTemplate'
   | 'errorResolved'
   | 'viewModels'
   | 'price'
   | 'transformOptions'
   | 'rateLimit'
   | 'testAPIKeys'
-  | 'disabledAPIKeys';
+  | 'disabledAPIKeys'
+  | 'endpoints';
 
 interface ChannelsContextType {
   open: ChannelsDialogType | null;
