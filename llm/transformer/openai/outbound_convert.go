@@ -64,6 +64,8 @@ func RequestFromLLM(r *llm.Request) *Request {
 		return ToolFromLLM(t), t.Type == llm.ToolTypeFunction
 	})
 
+	applyDeepSeekV4Thinking(req, r)
+
 	// Convert ToolChoice
 	if r.ToolChoice != nil {
 		req.ToolChoice = &ToolChoice{

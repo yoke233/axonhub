@@ -70,6 +70,9 @@ type Request struct {
 	// ReasoningEffort controls effort on reasoning models.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 
+	// Thinking controls provider-specific thinking mode.
+	Thinking *Thinking `json:"thinking,omitempty"`
+
 	// ReasoningBudget is the budget for reasoning tokens.
 	ReasoningBudget *int64 `json:"reasoning_budget,omitempty"`
 
@@ -95,6 +98,11 @@ type Request struct {
 
 	// Verbosity constrains response verbosity.
 	Verbosity *string `json:"verbosity,omitempty"`
+}
+
+// Thinking represents provider-specific thinking controls.
+type Thinking struct {
+	Type string `json:"type"`
 }
 
 // StreamOptions for streaming responses.

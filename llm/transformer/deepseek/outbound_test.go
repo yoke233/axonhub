@@ -190,6 +190,94 @@ func TestOutboundTransformer_TransformRequest_Thinking(t *testing.T) {
 	}
 }
 
+func TestOutboundTransformer_TransformRequest_DeepSeekV4Thinking(t *testing.T) {
+	config := &Config{
+		BaseURL:        "https://api.deepseek.com/v1",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-api-key"),
+	}
+
+	transformer, err := NewOutboundTransformerWithConfig(config)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name                 string
+		reasoningEffort      string
+		withTools            bool
+		expectedThinking     string
+		expectedReasoning    string
+		expectReasoningEmpty bool
+	}{
+		{
+			name:              "plain request defaults to high",
+			expectedThinking:  "enabled",
+			expectedReasoning: "high",
+		},
+		{
+			name:              "agentic request defaults to max",
+			withTools:         true,
+			expectedThinking:  "enabled",
+			expectedReasoning: "max",
+		},
+		{
+			name:              "low maps to high",
+			reasoningEffort:   "low",
+			expectedThinking:  "enabled",
+			expectedReasoning: "high",
+		},
+		{
+			name:              "xhigh maps to max",
+			reasoningEffort:   "xhigh",
+			expectedThinking:  "enabled",
+			expectedReasoning: "max",
+		},
+		{
+			name:                 "none disables thinking",
+			reasoningEffort:      "none",
+			expectedThinking:     "disabled",
+			expectReasoningEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &llm.Request{
+				Model:           "deepseek-v4-flash",
+				ReasoningEffort: tt.reasoningEffort,
+				Messages: []llm.Message{
+					{
+						Role: "user",
+						Content: llm.MessageContent{
+							Content: lo.ToPtr("Hello"),
+						},
+					},
+				},
+			}
+			if tt.withTools {
+				request.Tools = []llm.Tool{{
+					Type: llm.ToolTypeFunction,
+					Function: llm.Function{
+						Name:       "get_weather",
+						Parameters: []byte(`{"type":"object"}`),
+					},
+				}}
+			}
+
+			got, err := transformer.TransformRequest(context.Background(), request)
+			require.NoError(t, err)
+
+			var dsReq Request
+			require.NoError(t, json.Unmarshal(got.Body, &dsReq))
+			require.NotNil(t, dsReq.Thinking)
+			require.Equal(t, tt.expectedThinking, dsReq.Thinking.Type)
+			if tt.expectReasoningEmpty {
+				require.Empty(t, dsReq.ReasoningEffort)
+			} else {
+				require.Equal(t, tt.expectedReasoning, dsReq.ReasoningEffort)
+			}
+		})
+	}
+}
+
 func TestOutboundTransformer_TransformRequest_URL(t *testing.T) {
 	tests := []struct {
 		name        string

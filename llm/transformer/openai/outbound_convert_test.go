@@ -101,6 +101,76 @@ func TestRequestFromLLM_FiltersResponsesCustomTools(t *testing.T) {
 	require.Equal(t, llm.ToolTypeFunction, req.Tools[0].Type)
 }
 
+func TestRequestFromLLM_DeepSeekV4Thinking(t *testing.T) {
+	tests := []struct {
+		name              string
+		req               *llm.Request
+		wantThinkingType  string
+		wantReasoning     string
+		wantNoReasoning   bool
+	}{
+		{
+			name: "defaults to high for plain requests",
+			req: &llm.Request{
+				Model:    "deepseek-v4-pro",
+				Messages: []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinkingType: "enabled",
+			wantReasoning:    "high",
+		},
+		{
+			name: "defaults to max for agentic requests",
+			req: &llm.Request{
+				Model:    "deepseek-v4-flash",
+				Messages: []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				Tools: []llm.Tool{{
+					Type: llm.ToolTypeFunction,
+					Function: llm.Function{
+						Name:       "get_weather",
+						Parameters: []byte(`{"type":"object"}`),
+					},
+				}},
+			},
+			wantThinkingType: "enabled",
+			wantReasoning:    "max",
+		},
+		{
+			name: "maps xhigh to max",
+			req: &llm.Request{
+				Model:           "deepseek-v4-pro",
+				ReasoningEffort: "xhigh",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinkingType: "enabled",
+			wantReasoning:    "max",
+		},
+		{
+			name: "none disables thinking",
+			req: &llm.Request{
+				Model:           "deepseek-v4-pro",
+				ReasoningEffort: "none",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinkingType: "disabled",
+			wantNoReasoning:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := RequestFromLLM(tt.req)
+			require.NotNil(t, req)
+			require.NotNil(t, req.Thinking)
+			require.Equal(t, tt.wantThinkingType, req.Thinking.Type)
+			if tt.wantNoReasoning {
+				require.Empty(t, req.ReasoningEffort)
+			} else {
+				require.Equal(t, tt.wantReasoning, req.ReasoningEffort)
+			}
+		})
+	}
+}
+
 func TestMessageContentPartAudioRoundTrip(t *testing.T) {
 	part := llm.MessageContentPart{
 		Type: "input_audio",

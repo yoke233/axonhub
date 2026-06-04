@@ -92,6 +92,7 @@ func (t *OutboundTransformer) TransformRequest(
 	}
 
 	oaiReq := openai.RequestFromLLM(llmReq)
+	oaiReq.Thinking = nil
 
 	// DeepSeek doesn't support json_schema, convert to json_object
 	if oaiReq.ResponseFormat != nil && oaiReq.ResponseFormat.Type == "json_schema" {
@@ -103,16 +104,19 @@ func (t *OutboundTransformer) TransformRequest(
 		Request: *oaiReq,
 	}
 
-	// Convert ReasoningEffort to Thinking if present.
-	if llmReq.ReasoningEffort == "none" {
-		dsReq.Thinking = &Thinking{
-			Type: "disabled",
+	if control, ok := llm.ResolveDeepSeekV4ThinkingControl(llmReq); ok {
+		if control.Enabled {
+			dsReq.Thinking = &Thinking{Type: "enabled"}
+			dsReq.Request.ReasoningEffort = control.Effort
+		} else {
+			dsReq.Thinking = &Thinking{Type: "disabled"}
+			dsReq.Request.ReasoningEffort = ""
 		}
+	} else if llmReq.ReasoningEffort == "none" {
+		dsReq.Thinking = &Thinking{Type: "disabled"}
 		dsReq.Request.ReasoningEffort = ""
 	} else if llmReq.ReasoningEffort != "" {
-		dsReq.Thinking = &Thinking{
-			Type: "enabled",
-		}
+		dsReq.Thinking = &Thinking{Type: "enabled"}
 	}
 
 	body, err := json.Marshal(dsReq)

@@ -394,7 +394,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					Type: "disabled",
 				},
 			},
-			expectedEffort: "",
+			expectedEffort: "none",
 		},
 		{
 			name: "no thinking configuration",
@@ -575,6 +575,280 @@ func TestThinking_AdaptiveOutbound(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			anthropicReq := convertToAnthropicRequest(tt.chatReq)
 			tt.validate(t, anthropicReq)
+		})
+	}
+}
+
+func TestThinking_ClaudeAdaptiveOnlyOutbound(t *testing.T) {
+	tests := []struct {
+		name             string
+		req              *llm.Request
+		config           *Config
+		wantThinkingType string
+		wantEffort       string
+		wantBudget       int64
+		wantThinking     bool
+		wantOutputConfig bool
+	}{
+		{
+			name: "claude opus 4.7 converts enabled budget to adaptive high effort",
+			req: &llm.Request{
+				Model:           "claude-opus-4-7",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "high",
+				ReasoningBudget: lo.ToPtr(int64(30000)),
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinking:     true,
+			wantThinkingType: "adaptive",
+			wantEffort:       "high",
+			wantOutputConfig: true,
+		},
+		{
+			name: "claude opus 4.8 preserves xhigh effort",
+			req: &llm.Request{
+				Model:           "claude-opus-4-8-20260601",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "xhigh",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinking:     true,
+			wantThinkingType: "adaptive",
+			wantEffort:       "xhigh",
+			wantOutputConfig: true,
+		},
+		{
+			name: "metadata output config wins over reasoning effort",
+			req: &llm.Request{
+				Model:           "claude-opus-4-7",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "high",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				TransformerMetadata: map[string]any{
+					TransformerMetadataKeyThinkingType:       "adaptive",
+					TransformerMetadataKeyOutputConfigEffort: "max",
+					TransformerMetadataKeyThinkingDisplay:    "summarized",
+				},
+			},
+			wantThinking:     true,
+			wantThinkingType: "adaptive",
+			wantEffort:       "max",
+			wantOutputConfig: true,
+		},
+		{
+			name: "none keeps thinking off",
+			req: &llm.Request{
+				Model:           "claude-opus-4-8",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "none",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+		},
+		{
+			name: "non adaptive-only model keeps enabled budget",
+			req: &llm.Request{
+				Model:           "claude-sonnet-4-5-20250929",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "high",
+				ReasoningBudget: lo.ToPtr(int64(30000)),
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinking:     true,
+			wantThinkingType: "enabled",
+			wantBudget:       30000,
+		},
+		{
+			name: "unsupported platform keeps enabled budget",
+			req: &llm.Request{
+				Model:           "claude-opus-4-7",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "high",
+				ReasoningBudget: lo.ToPtr(int64(30000)),
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			config: &Config{
+				Type: PlatformDeepSeek,
+			},
+			wantThinking:     true,
+			wantThinkingType: "enabled",
+			wantBudget:       30000,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := convertToAnthropicRequestWithConfig(tt.req, tt.config, shared.TransportScope{})
+
+			if !tt.wantThinking {
+				require.Nil(t, req.Thinking)
+				require.Nil(t, req.OutputConfig)
+				return
+			}
+
+			require.NotNil(t, req.Thinking)
+			require.Equal(t, tt.wantThinkingType, req.Thinking.Type)
+			require.Equal(t, tt.wantBudget, req.Thinking.BudgetTokens)
+
+			if display, ok := tt.req.TransformerMetadata[TransformerMetadataKeyThinkingDisplay].(string); ok && display != "" {
+				require.Equal(t, display, req.Thinking.Display)
+			}
+
+			if tt.wantOutputConfig {
+				require.NotNil(t, req.OutputConfig)
+				require.Equal(t, tt.wantEffort, req.OutputConfig.Effort)
+			} else {
+				require.Nil(t, req.OutputConfig)
+			}
+		})
+	}
+}
+
+func TestThinking_ClaudeAdaptiveOnlyOutboundForcedToolChoice(t *testing.T) {
+	tests := []struct {
+		name               string
+		toolChoice         *llm.ToolChoice
+		wantToolChoiceType string
+		wantToolChoiceName string
+	}{
+		{
+			name: "required tool choice maps to any and disables thinking",
+			toolChoice: &llm.ToolChoice{
+				ToolChoice: lo.ToPtr("required"),
+			},
+			wantToolChoiceType: "any",
+		},
+		{
+			name: "any tool choice disables thinking",
+			toolChoice: &llm.ToolChoice{
+				ToolChoice: lo.ToPtr("any"),
+			},
+			wantToolChoiceType: "any",
+		},
+		{
+			name: "named tool choice disables thinking",
+			toolChoice: &llm.ToolChoice{
+				NamedToolChoice: &llm.NamedToolChoice{
+					Type: "function",
+					Function: llm.ToolFunction{
+						Name: "get_weather",
+					},
+				},
+			},
+			wantToolChoiceType: "tool",
+			wantToolChoiceName: "get_weather",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := convertToAnthropicRequestWithConfig(&llm.Request{
+				Model:           "claude-opus-4-7",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "high",
+				ReasoningBudget: lo.ToPtr(int64(30000)),
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				Tools: []llm.Tool{{
+					Type: llm.ToolTypeFunction,
+					Function: llm.Function{
+						Name:       "get_weather",
+						Parameters: []byte(`{"type":"object"}`),
+					},
+				}},
+				ToolChoice: tt.toolChoice,
+				TransformerMetadata: map[string]any{
+					TransformerMetadataKeyThinkingType:       "adaptive",
+					TransformerMetadataKeyOutputConfigEffort: "max",
+				},
+			}, nil, shared.TransportScope{})
+
+			require.Nil(t, req.Thinking)
+			require.Nil(t, req.OutputConfig)
+			require.NotNil(t, req.ToolChoice)
+			require.Equal(t, tt.wantToolChoiceType, req.ToolChoice.Type)
+			if tt.wantToolChoiceName != "" {
+				require.NotNil(t, req.ToolChoice.Name)
+				require.Equal(t, tt.wantToolChoiceName, *req.ToolChoice.Name)
+			}
+		})
+	}
+}
+
+func TestThinking_DeepSeekV4AnthropicOutbound(t *testing.T) {
+	tests := []struct {
+		name             string
+		req              *llm.Request
+		wantThinkingType string
+		wantEffort       string
+		wantOutputConfig bool
+	}{
+		{
+			name: "plain request defaults to high",
+			req: &llm.Request{
+				Model:     "deepseek-v4-pro",
+				MaxTokens: lo.ToPtr(int64(4096)),
+				Messages:  []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinkingType: "enabled",
+			wantEffort:       "high",
+			wantOutputConfig: true,
+		},
+		{
+			name: "tool request defaults to max",
+			req: &llm.Request{
+				Model:     "deepseek-v4-flash",
+				MaxTokens: lo.ToPtr(int64(4096)),
+				Messages:  []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				Tools: []llm.Tool{{
+					Type: llm.ToolTypeFunction,
+					Function: llm.Function{
+						Name:       "get_weather",
+						Parameters: []byte(`{"type":"object"}`),
+					},
+				}},
+			},
+			wantThinkingType: "enabled",
+			wantEffort:       "max",
+			wantOutputConfig: true,
+		},
+		{
+			name: "metadata output_config max is preserved",
+			req: &llm.Request{
+				Model:           "deepseek-v4-pro",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "xhigh",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				TransformerMetadata: map[string]any{
+					TransformerMetadataKeyOutputConfigEffort: "max",
+				},
+			},
+			wantThinkingType: "enabled",
+			wantEffort:       "max",
+			wantOutputConfig: true,
+		},
+		{
+			name: "none disables thinking",
+			req: &llm.Request{
+				Model:           "deepseek-v4-pro",
+				MaxTokens:       lo.ToPtr(int64(4096)),
+				ReasoningEffort: "none",
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			},
+			wantThinkingType: "disabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := convertToAnthropicRequest(tt.req)
+			require.NotNil(t, req.Thinking)
+			require.Equal(t, tt.wantThinkingType, req.Thinking.Type)
+			require.Zero(t, req.Thinking.BudgetTokens)
+			if tt.wantOutputConfig {
+				require.NotNil(t, req.OutputConfig)
+				require.Equal(t, tt.wantEffort, req.OutputConfig.Effort)
+			} else {
+				require.Nil(t, req.OutputConfig)
+			}
 		})
 	}
 }

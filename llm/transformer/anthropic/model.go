@@ -163,9 +163,8 @@ type Thinking struct {
 // See: https://platform.claude.com/docs/en/build-with-claude/effort
 type OutputConfig struct {
 	// Effort controls the overall effort level for the response.
-	// Any of "low", "medium", "high", "max".
-	// "max" is only supported by claude-opus-4-6.
-	Effort string `json:"effort,omitempty" validate:"omitempty,oneof=low medium high max"`
+	// Any of "low", "medium", "high", "xhigh", "max".
+	Effort string `json:"effort,omitempty" validate:"omitempty,oneof=low medium high xhigh max"`
 }
 
 type ToolChoice struct {

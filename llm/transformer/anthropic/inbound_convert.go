@@ -301,6 +301,8 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 	// Convert thinking configuration to reasoning effort and preserve budget
 	if anthropicReq.Thinking != nil {
 		switch anthropicReq.Thinking.Type {
+		case "disabled":
+			chatReq.ReasoningEffort = "none"
 		case "enabled":
 			chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
 			chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)

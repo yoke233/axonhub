@@ -1,5 +1,11 @@
 package anthropic
 
+import (
+	"strings"
+
+	"github.com/looplj/axonhub/llm"
+)
+
 func supportsAdaptiveThinking(config *Config) bool {
 	if config == nil {
 		return true
@@ -11,6 +17,106 @@ func supportsAdaptiveThinking(config *Config) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isClaudeAdaptiveOnlyThinkingModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "claude-opus-4-7") ||
+		strings.HasPrefix(model, "claude-opus-4-8")
+}
+
+func applyDeepSeekV4Thinking(req *MessageRequest, chatReq *llm.Request) bool {
+	if req == nil || chatReq == nil {
+		return false
+	}
+
+	control, ok := llm.ResolveDeepSeekV4ThinkingControl(chatReq)
+	if !ok {
+		return false
+	}
+
+	if control.Enabled {
+		req.Thinking = &Thinking{Type: "enabled"}
+		req.OutputConfig = &OutputConfig{Effort: control.Effort}
+	} else {
+		req.Thinking = &Thinking{Type: "disabled"}
+	}
+
+	return true
+}
+
+func applyClaudeAdaptiveOnlyThinking(req *MessageRequest, chatReq *llm.Request, config *Config) bool {
+	if req == nil || chatReq == nil {
+		return false
+	}
+	if !supportsAdaptiveThinking(config) || !isClaudeAdaptiveOnlyThinkingModel(chatReq.Model) {
+		return false
+	}
+
+	if forcesAnthropicToolUse(chatReq.ToolChoice) {
+		return true
+	}
+
+	thinkingType, _ := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string)
+	outputEffort, hasOutputEffort := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string)
+
+	if chatReq.ReasoningEffort == "none" {
+		return true
+	}
+
+	thinkingRequested := thinkingType == "adaptive" || chatReq.ReasoningEffort != "" || chatReq.ReasoningBudget != nil
+	if !thinkingRequested {
+		if hasOutputEffort && outputEffort != "" {
+			req.OutputConfig = &OutputConfig{Effort: normalizeClaudeAdaptiveOnlyEffort(outputEffort)}
+		}
+		return true
+	}
+
+	req.Thinking = &Thinking{Type: "adaptive"}
+	if display, ok := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingDisplay].(string); ok && display != "" {
+		req.Thinking.Display = display
+	}
+
+	req.OutputConfig = &OutputConfig{Effort: resolveClaudeAdaptiveOnlyEffort(chatReq, outputEffort)}
+
+	return true
+}
+
+func forcesAnthropicToolUse(choice *llm.ToolChoice) bool {
+	if choice == nil {
+		return false
+	}
+
+	if choice.ToolChoice != nil {
+		switch strings.ToLower(strings.TrimSpace(*choice.ToolChoice)) {
+		case "any", "required":
+			return true
+		}
+	}
+
+	return choice.NamedToolChoice != nil && choice.NamedToolChoice.Function.Name != ""
+}
+
+func resolveClaudeAdaptiveOnlyEffort(chatReq *llm.Request, outputEffort string) string {
+	if outputEffort != "" {
+		return normalizeClaudeAdaptiveOnlyEffort(outputEffort)
+	}
+	if chatReq.ReasoningEffort != "" {
+		return normalizeClaudeAdaptiveOnlyEffort(chatReq.ReasoningEffort)
+	}
+	if chatReq.ReasoningBudget != nil {
+		return thinkingBudgetToReasoningEffort(*chatReq.ReasoningBudget)
+	}
+	return "high"
+}
+
+func normalizeClaudeAdaptiveOnlyEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return "high"
 	}
 }
 

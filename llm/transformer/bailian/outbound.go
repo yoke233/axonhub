@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/tidwall/sjson"
+
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -61,7 +63,42 @@ func NewOutboundTransformerWithConfig(config *Config) (transformer.Outbound, err
 func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.Request) (*httpclient.Request, error) {
 	llmReq = mergeConsecutiveToolCallMessages(llmReq)
 
-	return t.Outbound.TransformRequest(ctx, llmReq)
+	req, err := t.Outbound.TransformRequest(ctx, llmReq)
+	if err != nil {
+		return nil, err
+	}
+
+	applyBailianDeepSeekV4Thinking(req, llmReq)
+
+	return req, nil
+}
+
+func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Request) {
+	control, ok := llm.ResolveDeepSeekV4ThinkingControl(llmReq)
+	if !ok || httpReq == nil || len(httpReq.Body) == 0 {
+		return
+	}
+
+	body, err := sjson.DeleteBytes(httpReq.Body, "thinking")
+	if err != nil {
+		return
+	}
+
+	body, err = sjson.SetBytes(body, "enable_thinking", control.Enabled)
+	if err != nil {
+		return
+	}
+
+	if control.Enabled {
+		body, err = sjson.SetBytes(body, "reasoning_effort", control.Effort)
+	} else {
+		body, err = sjson.DeleteBytes(body, "reasoning_effort")
+	}
+	if err != nil {
+		return
+	}
+
+	httpReq.Body = body
 }
 
 func mergeConsecutiveToolCallMessages(req *llm.Request) *llm.Request {

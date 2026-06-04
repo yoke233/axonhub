@@ -72,6 +72,14 @@ func buildBaseRequest(chatReq *llm.Request, config *Config) *MessageRequest {
 		req.Metadata = &AnthropicMetadata{UserID: chatReq.Metadata["user_id"]}
 	}
 
+	if applyDeepSeekV4Thinking(req, chatReq) {
+		return req
+	}
+
+	if applyClaudeAdaptiveOnlyThinking(req, chatReq, config) {
+		return req
+	}
+
 	// Determine thinking config priority: adaptive > enabled > disabled
 	if chatReq.TransformerMetadata != nil {
 		if v, ok := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string); ok && v == "adaptive" {

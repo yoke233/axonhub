@@ -67,6 +67,10 @@ func (r *Request) ToLLMRequest() *llm.Request {
 		Verbosity:           r.Verbosity,
 	}
 
+	if r.Thinking != nil && r.Thinking.Type == "disabled" {
+		req.ReasoningEffort = "none"
+	}
+
 	// Convert messages
 	req.Messages = lo.Map(r.Messages, func(m Message, _ int) llm.Message {
 		return m.ToLLMMessage()
