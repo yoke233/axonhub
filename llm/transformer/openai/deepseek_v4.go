@@ -8,6 +8,12 @@ func applyDeepSeekV4Thinking(req *Request, src *llm.Request) {
 		return
 	}
 
+	if llm.ForcesToolUse(src.ToolChoice) {
+		req.Thinking = &Thinking{Type: "disabled"}
+		req.ReasoningEffort = ""
+		return
+	}
+
 	if control.Enabled {
 		req.Thinking = &Thinking{Type: "enabled"}
 		req.ReasoningEffort = control.Effort

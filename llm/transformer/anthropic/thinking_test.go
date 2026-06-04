@@ -906,6 +906,37 @@ func TestThinking_DeepSeekV4AnthropicOutbound(t *testing.T) {
 	}
 }
 
+func TestThinking_DeepSeekV4AnthropicOutboundForcedToolChoice(t *testing.T) {
+	req := convertToAnthropicRequest(&llm.Request{
+		Model:           "deepseek-v4-pro",
+		MaxTokens:       lo.ToPtr(int64(4096)),
+		ReasoningEffort: "max",
+		Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("call the tool")}}},
+		Tools: []llm.Tool{{
+			Type: llm.ToolTypeFunction,
+			Function: llm.Function{
+				Name:       "get_weather",
+				Parameters: []byte(`{"type":"object"}`),
+			},
+		}},
+		ToolChoice: &llm.ToolChoice{
+			NamedToolChoice: &llm.NamedToolChoice{
+				Type: "function",
+				Function: llm.ToolFunction{
+					Name: "get_weather",
+				},
+			},
+		},
+	})
+
+	require.NotNil(t, req.Thinking)
+	require.Equal(t, "disabled", req.Thinking.Type)
+	require.Nil(t, req.OutputConfig)
+	require.NotNil(t, req.ToolChoice)
+	require.NotNil(t, req.ToolChoice.Name)
+	require.Equal(t, "get_weather", *req.ToolChoice.Name)
+}
+
 func TestThinking_AdaptiveInbound(t *testing.T) {
 	tests := []struct {
 		name         string

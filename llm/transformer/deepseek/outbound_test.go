@@ -195,6 +195,7 @@ func TestOutboundTransformer_TransformRequest_DeepSeekV4Thinking(t *testing.T) {
 		name                 string
 		reasoningEffort      string
 		withTools            bool
+		forcedToolChoice     bool
 		expectedThinking     string
 		expectedReasoning    string
 		expectReasoningEmpty bool
@@ -228,6 +229,13 @@ func TestOutboundTransformer_TransformRequest_DeepSeekV4Thinking(t *testing.T) {
 			expectedThinking:     "disabled",
 			expectReasoningEmpty: true,
 		},
+		{
+			name:                 "forced tool choice disables thinking",
+			withTools:            true,
+			forcedToolChoice:     true,
+			expectedThinking:     "disabled",
+			expectReasoningEmpty: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -252,6 +260,14 @@ func TestOutboundTransformer_TransformRequest_DeepSeekV4Thinking(t *testing.T) {
 						Parameters: []byte(`{"type":"object"}`),
 					},
 				}}
+			}
+			if tt.forcedToolChoice {
+				request.ToolChoice = &llm.ToolChoice{
+					NamedToolChoice: &llm.NamedToolChoice{
+						Type:     "function",
+						Function: llm.ToolFunction{Name: "get_weather"},
+					},
+				}
 			}
 
 			got, err := transformer.TransformRequest(context.Background(), request)

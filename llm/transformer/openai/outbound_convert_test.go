@@ -154,6 +154,28 @@ func TestRequestFromLLM_DeepSeekV4Thinking(t *testing.T) {
 			wantThinkingType: "disabled",
 			wantNoReasoning:  true,
 		},
+		{
+			name: "forced tool choice disables thinking",
+			req: &llm.Request{
+				Model:    "deepseek-v4-pro",
+				Messages: []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+				Tools: []llm.Tool{{
+					Type: llm.ToolTypeFunction,
+					Function: llm.Function{
+						Name:       "get_weather",
+						Parameters: []byte(`{"type":"object"}`),
+					},
+				}},
+				ToolChoice: &llm.ToolChoice{
+					NamedToolChoice: &llm.NamedToolChoice{
+						Type:     "function",
+						Function: llm.ToolFunction{Name: "get_weather"},
+					},
+				},
+			},
+			wantThinkingType: "disabled",
+			wantNoReasoning:  true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -58,6 +58,11 @@ func applyDeepSeekV4Thinking(req *MessageRequest, chatReq *llm.Request) bool {
 		return false
 	}
 
+	if llm.ForcesToolUse(chatReq.ToolChoice) {
+		req.Thinking = &Thinking{Type: "disabled"}
+		return true
+	}
+
 	if control.Enabled {
 		if effort, ok := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string); ok && effort != "" {
 			control.Effort = effort
@@ -80,7 +85,7 @@ func applyClaudeAdaptiveOnlyThinking(req *MessageRequest, chatReq *llm.Request, 
 		return false
 	}
 
-	if forcesAnthropicToolUse(chatReq.ToolChoice) {
+	if llm.ForcesToolUse(chatReq.ToolChoice) {
 		return true
 	}
 
@@ -107,21 +112,6 @@ func applyClaudeAdaptiveOnlyThinking(req *MessageRequest, chatReq *llm.Request, 
 	req.OutputConfig = &OutputConfig{Effort: resolveClaudeAdaptiveOnlyEffort(chatReq, outputEffort)}
 
 	return true
-}
-
-func forcesAnthropicToolUse(choice *llm.ToolChoice) bool {
-	if choice == nil {
-		return false
-	}
-
-	if choice.ToolChoice != nil {
-		switch strings.ToLower(strings.TrimSpace(*choice.ToolChoice)) {
-		case "any", "required":
-			return true
-		}
-	}
-
-	return choice.NamedToolChoice != nil && choice.NamedToolChoice.Function.Name != ""
 }
 
 func resolveClaudeAdaptiveOnlyEffort(chatReq *llm.Request, outputEffort string) string {

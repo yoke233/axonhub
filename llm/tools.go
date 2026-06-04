@@ -99,6 +99,21 @@ type NamedToolChoice struct {
 	Function ToolFunction `json:"function"`
 }
 
+func ForcesToolUse(choice *ToolChoice) bool {
+	if choice == nil {
+		return false
+	}
+
+	if choice.ToolChoice != nil {
+		switch strings.ToLower(strings.TrimSpace(*choice.ToolChoice)) {
+		case "any", "required":
+			return true
+		}
+	}
+
+	return choice.NamedToolChoice != nil && choice.NamedToolChoice.Function.Name != ""
+}
+
 func (t ToolChoice) MarshalJSON() ([]byte, error) {
 	if t.ToolChoice != nil {
 		return json.Marshal(t.ToolChoice)

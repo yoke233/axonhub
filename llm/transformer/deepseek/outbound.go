@@ -112,8 +112,12 @@ func (t *OutboundTransformer) TransformRequest(
 		Request: *oaiReq,
 	}
 
+	forcedToolUse := llm.ForcesToolUse(llmReq.ToolChoice)
 	if control, ok := llm.ResolveDeepSeekV4ThinkingControl(llmReq); ok {
-		if control.Enabled {
+		if forcedToolUse {
+			dsReq.Thinking = &Thinking{Type: "disabled"}
+			dsReq.Request.ReasoningEffort = ""
+		} else if control.Enabled {
 			dsReq.Thinking = &Thinking{Type: "enabled"}
 			dsReq.Request.ReasoningEffort = control.Effort
 		} else {
@@ -121,7 +125,7 @@ func (t *OutboundTransformer) TransformRequest(
 			dsReq.Request.ReasoningEffort = ""
 		}
 	} else {
-		thinkingDisabled := llmReq.ReasoningEffort == "none"
+		thinkingDisabled := llmReq.ReasoningEffort == "none" || forcedToolUse
 
 		dsReq.Thinking = &Thinking{
 			Type: "enabled",
@@ -135,7 +139,7 @@ func (t *OutboundTransformer) TransformRequest(
 
 	}
 
-	if dsReq.Thinking == nil || dsReq.Thinking.Type != "disabled" {
+	if dsReq.Thinking != nil && dsReq.Thinking.Type != "disabled" {
 		for i := range dsReq.Messages {
 			if dsReq.Messages[i].Role == "assistant" && dsReq.Messages[i].ReasoningContent == nil {
 				dsReq.Messages[i].ReasoningContent = lo.ToPtr("")
