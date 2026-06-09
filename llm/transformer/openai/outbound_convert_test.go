@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/samber/lo"
@@ -191,6 +192,31 @@ func TestRequestFromLLM_DeepSeekV4Thinking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRequestFromLLM_DeepSeekV4ThinkingJSONShape(t *testing.T) {
+	req := RequestFromLLM(&llm.Request{
+		Model:           "deepseek-v4-pro",
+		ReasoningEffort: "high",
+		ReasoningBudget: lo.ToPtr(int64(1024)),
+		Messages: []llm.Message{
+			{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}},
+		},
+	}, ReasoningFieldAll)
+	require.NotNil(t, req)
+
+	data, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(data, &body))
+	require.Equal(t, "high", body["reasoning_effort"])
+
+	thinking, ok := body["thinking"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "enabled", thinking["type"])
+	require.NotContains(t, thinking, "budget_tokens")
+	require.NotContains(t, body, "reasoning_budget")
 }
 
 func TestMessageContentPartAudioRoundTrip(t *testing.T) {

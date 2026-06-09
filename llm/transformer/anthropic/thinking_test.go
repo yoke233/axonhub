@@ -11,6 +11,7 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/openai"
 	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
@@ -1173,7 +1174,7 @@ func TestOutputConfig_Inbound(t *testing.T) {
 			},
 		},
 		{
-			name: "OutputConfig effort=max -> TransformerMetadata output_config_effort=max and ReasoningEffort=xhigh",
+			name: "OutputConfig effort=max -> TransformerMetadata output_config_effort=max and ReasoningEffort=max",
 			anthropicReq: &MessageRequest{
 				Model:     "claude-3-sonnet-20240229",
 				MaxTokens: 4096,
@@ -1189,7 +1190,7 @@ func TestOutputConfig_Inbound(t *testing.T) {
 				t.Helper()
 				require.NotNil(t, chatReq.TransformerMetadata)
 				require.Equal(t, "max", chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort])
-				require.Equal(t, "xhigh", chatReq.ReasoningEffort)
+				require.Equal(t, "max", chatReq.ReasoningEffort)
 			},
 		},
 		{
@@ -1218,6 +1219,94 @@ func TestOutputConfig_Inbound(t *testing.T) {
 			chatReq, err := convertToLLMRequest(tt.anthropicReq)
 			require.NoError(t, err)
 			tt.validate(t, chatReq)
+		})
+	}
+}
+
+func TestInboundAnthropicToOpenAIDeepSeekV4ThinkingShape(t *testing.T) {
+	tests := []struct {
+		name              string
+		body              string
+		wantThinkingType  string
+		wantReasoning     string
+		wantNoReasoning   bool
+		wantNoBudgetToken bool
+	}{
+		{
+			name: "thinking enabled without budget uses OpenAI reasoning effort",
+			body: `{
+				"model": "deepseek-v4-pro",
+				"max_tokens": 64,
+				"messages": [{"role": "user", "content": "hi"}],
+				"thinking": {"type": "enabled"}
+			}`,
+			wantThinkingType:  "enabled",
+			wantReasoning:     "high",
+			wantNoBudgetToken: true,
+		},
+		{
+			name: "thinking disabled stays disabled for OpenAI compatible outbound",
+			body: `{
+				"model": "deepseek-v4-pro",
+				"max_tokens": 64,
+				"messages": [{"role": "user", "content": "hi"}],
+				"thinking": {"type": "disabled"}
+			}`,
+			wantThinkingType:  "disabled",
+			wantNoReasoning:   true,
+			wantNoBudgetToken: true,
+		},
+		{
+			name: "output_config max maps to OpenAI reasoning effort max",
+			body: `{
+				"model": "deepseek-v4-pro",
+				"max_tokens": 64,
+				"messages": [{"role": "user", "content": "hi"}],
+				"output_config": {"effort": "max"}
+			}`,
+			wantThinkingType:  "enabled",
+			wantReasoning:     "max",
+			wantNoBudgetToken: true,
+		},
+	}
+
+	transformer := NewInboundTransformer()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpReq := &httpclient.Request{
+				Method: http.MethodPost,
+				URL:    "http://localhost/v1/messages",
+				Headers: http.Header{
+					"Content-Type": []string{"application/json"},
+				},
+				Body: []byte(tt.body),
+			}
+
+			llmReq, err := transformer.TransformRequest(context.Background(), httpReq)
+			require.NoError(t, err)
+
+			openAIReq := openai.RequestFromLLM(llmReq, openai.ReasoningFieldContent)
+			require.NotNil(t, openAIReq)
+			require.NotNil(t, openAIReq.Thinking)
+			require.Equal(t, tt.wantThinkingType, openAIReq.Thinking.Type)
+			if tt.wantNoReasoning {
+				require.Empty(t, openAIReq.ReasoningEffort)
+			} else {
+				require.Equal(t, tt.wantReasoning, openAIReq.ReasoningEffort)
+			}
+
+			data, err := json.Marshal(openAIReq)
+			require.NoError(t, err)
+
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(data, &payload))
+			thinking, ok := payload["thinking"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, tt.wantThinkingType, thinking["type"])
+			if tt.wantNoBudgetToken {
+				require.NotContains(t, thinking, "budget_tokens")
+			}
+			require.NotContains(t, payload, "reasoning_budget")
 		})
 	}
 }

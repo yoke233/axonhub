@@ -338,8 +338,12 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "disabled"
 			chatReq.ReasoningEffort = "none"
 		case "enabled":
-			chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
-			chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)
+			if anthropicReq.Thinking.BudgetTokens > 0 {
+				chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
+				chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)
+			} else {
+				chatReq.ReasoningEffort = "high"
+			}
 
 			if anthropicReq.Thinking.Display != "" {
 				chatReq.TransformerMetadata[TransformerMetadataKeyThinkingDisplay] = anthropicReq.Thinking.Display
@@ -360,14 +364,9 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 	// Convert output_config
 	if anthropicReq.OutputConfig != nil && anthropicReq.OutputConfig.Effort != "" {
 		chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort] = anthropicReq.OutputConfig.Effort
-		// Map output_config effort to reasoning_effort so other outbound transformers can use it.
-		// Anthropic "max" has no direct equivalent in other providers; map to "xhigh"
-		// so downstream transformers can handle it explicitly.
-		if anthropicReq.OutputConfig.Effort == "max" {
-			chatReq.ReasoningEffort = "xhigh"
-		} else {
-			chatReq.ReasoningEffort = anthropicReq.OutputConfig.Effort
-		}
+		// Preserve output_config effort as reasoning_effort for OpenAI-compatible
+		// outbounds that accept the same effort vocabulary, including "max".
+		chatReq.ReasoningEffort = anthropicReq.OutputConfig.Effort
 	}
 
 	return chatReq, nil

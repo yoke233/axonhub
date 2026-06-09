@@ -334,7 +334,17 @@ func TestInboundTransformer_TransformRequest(t *testing.T) {
 					"thinking": {"type": "enabled"}
 				}`),
 			},
-			expectError: true,
+			expected: &llm.Request{
+				Model:     "claude-sonnet-4-5-20250929",
+				MaxTokens: lo.ToPtr(int64(16000)),
+				Messages: []llm.Message{
+					{
+						Role:    "user",
+						Content: llm.MessageContent{Content: lo.ToPtr("Hello")},
+					},
+				},
+			},
+			expectError: false,
 		},
 		{
 			name: "thinking adaptive with invalid output_config.effort value",
@@ -509,18 +519,33 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 		require.Nil(t, got.ReasoningBudget)
 	})
 
-	t.Run("thinking enabled requires positive budget_tokens", func(t *testing.T) {
+	t.Run("thinking enabled defaults effort when budget_tokens is omitted", func(t *testing.T) {
 		req := mkReq(`{
 			"model": "claude-sonnet-4-5-20250929",
 			"max_tokens": 1024,
 			"messages": [{"role": "user", "content": "Hello"}],
-			"thinking": {"type": "enabled", "budget_tokens": 0}
+			"thinking": {"type": "enabled"}
+		}`)
+
+		got, err := transformer.TransformRequest(t.Context(), req)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.Equal(t, "high", got.ReasoningEffort)
+		require.Nil(t, got.ReasoningBudget)
+	})
+
+	t.Run("thinking enabled rejects negative budget_tokens", func(t *testing.T) {
+		req := mkReq(`{
+			"model": "claude-sonnet-4-5-20250929",
+			"max_tokens": 1024,
+			"messages": [{"role": "user", "content": "Hello"}],
+			"thinking": {"type": "enabled", "budget_tokens": -1}
 		}`)
 
 		got, err := transformer.TransformRequest(t.Context(), req)
 		require.Error(t, err)
 		require.Nil(t, got)
-		require.Contains(t, err.Error(), "budget_tokens is required and must be positive")
+		require.Contains(t, err.Error(), "budget_tokens must be positive")
 	})
 
 	t.Run("thinking enabled with positive budget_tokens is accepted", func(t *testing.T) {

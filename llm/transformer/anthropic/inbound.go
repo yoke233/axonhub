@@ -85,8 +85,8 @@ func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *http
 		case "disabled":
 			// valid
 		case "enabled":
-			if anthropicReq.Thinking.BudgetTokens <= 0 {
-				return nil, fmt.Errorf("%w: budget_tokens is required and must be positive when thinking type is enabled", transformer.ErrInvalidRequest)
+			if anthropicReq.Thinking.BudgetTokens < 0 {
+				return nil, fmt.Errorf("%w: budget_tokens must be positive when provided", transformer.ErrInvalidRequest)
 			}
 		case "adaptive":
 			// output_config is optional for adaptive thinking (defaults to "high" effort upstream)
