@@ -462,3 +462,19 @@ func TestMergeHTTPHeaders(t *testing.T) {
 		require.Equal(t, dest, got)
 	})
 }
+
+func TestMergeHTTPHeaders_AcceptNotOverridden(t *testing.T) {
+	// The transformer-owned Accept (e.g. */* for TTS binary audio) must not be
+	// overridden by the inbound client's Accept.
+	dest := http.Header{}
+	dest.Set("Accept", "*/*")
+	dest.Set("Content-Type", "application/json")
+
+	src := http.Header{}
+	src.Set("Accept", "text/event-stream")
+	src.Set("X-Custom", "client-value")
+
+	merged := MergeHTTPHeaders(dest, src)
+	assert.Equal(t, "*/*", merged.Get("Accept"))
+	assert.Equal(t, "client-value", merged.Get("X-Custom"))
+}
