@@ -206,7 +206,9 @@ func TestReasoningEffortToThinking(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chatReq := &llm.Request{
-				Model:           "claude-3-sonnet-20240229",
+				Model: "claude-3-sonnet-20240229",
+				// Large enough so the budget clamp does not kick in.
+				MaxTokens:       lo.ToPtr(int64(64000)),
 				ReasoningEffort: tt.reasoningEffort,
 			}
 
@@ -289,7 +291,9 @@ func TestReasoningBudgetPriority(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			chatReq := &llm.Request{
-				Model:           "claude-3-sonnet-20240229",
+				Model: "claude-3-sonnet-20240229",
+				// Large enough so the budget clamp does not kick in.
+				MaxTokens:       lo.ToPtr(int64(64000)),
 				ReasoningEffort: tt.reasoningEffort,
 				ReasoningBudget: tt.reasoningBudget,
 			}
@@ -542,7 +546,7 @@ func TestThinking_AdaptiveOutbound(t *testing.T) {
 		validate func(t *testing.T, anthropicReq *MessageRequest)
 	}{
 		{
-			name: "metadata thinking_type=adaptive -> Thinking{Type: adaptive} and omit budget_tokens",
+			name: "metadata thinking_type=adaptive on unsupported model degrades to enabled budget",
 			chatReq: &llm.Request{
 				Model:     "claude-3-sonnet-20240229",
 				MaxTokens: lo.ToPtr(int64(4096)),
@@ -562,12 +566,11 @@ func TestThinking_AdaptiveOutbound(t *testing.T) {
 			},
 			validate: func(t *testing.T, anthropicReq *MessageRequest) {
 				t.Helper()
+				// claude-3 does not support thinking.type=adaptive; the explicit
+				// budget keeps enabled thinking instead.
 				require.NotNil(t, anthropicReq.Thinking)
-				require.Equal(t, "adaptive", anthropicReq.Thinking.Type)
-
-				thinkingJSON, err := json.Marshal(anthropicReq.Thinking)
-				require.NoError(t, err)
-				require.JSONEq(t, `{"type":"adaptive"}`, string(thinkingJSON))
+				require.Equal(t, "enabled", anthropicReq.Thinking.Type)
+				require.Equal(t, int64(30000), anthropicReq.Thinking.BudgetTokens)
 			},
 		},
 		{
@@ -816,7 +819,10 @@ func TestThinking_ClaudeAdaptiveOnlyOutboundForcedToolChoice(t *testing.T) {
 			}, nil)
 
 			require.Nil(t, req.Thinking)
-			require.Nil(t, req.OutputConfig)
+			// output_config.effort is independent of thinking and survives the
+			// forced-tool guard.
+			require.NotNil(t, req.OutputConfig)
+			require.Equal(t, "max", req.OutputConfig.Effort)
 			require.NotNil(t, req.ToolChoice)
 			require.Equal(t, tt.wantToolChoiceType, req.ToolChoice.Type)
 			if tt.wantToolChoiceName != "" {

@@ -338,6 +338,8 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "disabled"
 			chatReq.ReasoningEffort = "none"
 		case "enabled":
+			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "enabled"
+
 			if anthropicReq.Thinking.BudgetTokens > 0 {
 				chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
 				chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)

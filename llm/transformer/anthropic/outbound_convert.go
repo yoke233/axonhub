@@ -124,35 +124,50 @@ func buildBaseRequest(chatReq *llm.Request, config *Config) *MessageRequest {
 		req.Metadata = &AnthropicMetadata{UserID: chatReq.Metadata["user_id"]}
 	}
 
-	thinkingHandled := applyDeepSeekV4Thinking(req, chatReq) || applyClaudeAdaptiveOnlyThinking(req, chatReq, config)
+	thinkingHandled := applyDeepSeekV4Thinking(req, chatReq) || applyClaudeAdaptiveThinking(req, chatReq, config)
 	if !thinkingHandled {
+		effort := normalizeEffortValue(chatReq.ReasoningEffort)
+		thinkingTypeMeta, _ := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string)
+		outputEffortMeta, hasOutputEffortMeta := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string)
+
+		// Anthropic rejects tool_choice "any"/"tool" combined with thinking, so
+		// forced tool use keeps enabled/adaptive thinking off. Claude models
+		// only — Anthropic-compatible third parties accept the combination.
+		forcedToolUse := llm.ForcesToolUse(chatReq.ToolChoice) && isClaudeModelID(chatReq.Model)
+
 		// DeepSeek Anthropic format supports output_config.effort. When reasoning_effort
 		// is present, prefer output_config over thinking so suffix-based effort routing
 		// (for example deepseek-chat-max) preserves the explicit effort level.
 		// Note: "none" is not a valid effort value, so skip it (it means disabled thinking).
-		if config != nil && config.Type == PlatformDeepSeek && isDeepSeekAnthropicOutputConfigModel(chatReq.Model) && chatReq.ReasoningEffort != "" && chatReq.ReasoningEffort != "none" {
+		if config != nil && config.Type == PlatformDeepSeek && isDeepSeekAnthropicOutputConfigModel(chatReq.Model) && effort != "" && effort != "none" {
 			req.OutputConfig = &OutputConfig{Effort: chatReq.ReasoningEffort}
 		}
 
-		// Determine thinking config priority: disabled > adaptive > enabled
-		if chatReq.TransformerMetadata != nil {
-			if v, ok := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string); ok {
-				switch v {
-				case "disabled":
-					req.Thinking = &Thinking{Type: "disabled"}
-				case "adaptive":
-					req.Thinking = &Thinking{Type: "adaptive"}
-				}
+		switch thinkingTypeMeta {
+		case "disabled":
+			if !isClaudeOmitDisabledThinkingModel(chatReq.Model) {
+				req.Thinking = &Thinking{Type: "disabled"}
 			}
+		case "adaptive":
+			// Reaching the generic path means the target does not support
+			// thinking.type = "adaptive" (supported model/platform pairs are
+			// handled in applyClaudeAdaptiveThinking): leave it unset so the
+			// effort/budget fallback below degrades it to enabled+budget_tokens.
 		}
 
 		// Handle ReasoningEffort="none" as disabled thinking (e.g., from OpenAI inbound)
 		// This check is needed when TransformerMetadata is not set but ReasoningEffort is "none"
-		if req.Thinking == nil && chatReq.ReasoningEffort == "none" {
+		if req.Thinking == nil && (effort == "none" || isZeroReasoningBudget(chatReq)) && !isClaudeOmitDisabledThinkingModel(chatReq.Model) {
 			req.Thinking = &Thinking{Type: "disabled"}
 		}
 
-		if req.OutputConfig == nil && req.Thinking == nil && chatReq.ReasoningEffort != "none" && (chatReq.ReasoningEffort != "" || chatReq.ReasoningBudget != nil) {
+		// A ReasoningEffort that merely mirrors the client's output_config.effort
+		// (Anthropic inbound, no thinking field) is not a thinking request.
+		effortOnlyFromOutputConfig := hasOutputEffortMeta && outputEffortMeta != "" &&
+			thinkingTypeMeta == "" && chatReq.ReasoningBudget == nil
+
+		if req.OutputConfig == nil && req.Thinking == nil && !forcedToolUse && !effortOnlyFromOutputConfig &&
+			effort != "none" && (effort != "" || chatReq.ReasoningBudget != nil) {
 			req.Thinking = buildThinking(chatReq, config)
 		}
 
@@ -164,19 +179,21 @@ func buildBaseRequest(chatReq *llm.Request, config *Config) *MessageRequest {
 		}
 
 		// Restore output_config from TransformerMetadata
-		if chatReq.TransformerMetadata != nil {
-			if effort, ok := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string); ok && effort != "" {
-				if supportsOutputConfig(config) {
-					req.OutputConfig = &OutputConfig{Effort: effort}
-				} else if req.Thinking == nil || req.Thinking.Type == "adaptive" {
+		if hasOutputEffortMeta && outputEffortMeta != "" {
+			if supportsOutputConfig(config) {
+				req.OutputConfig = &OutputConfig{Effort: outputEffortMeta}
+			} else if !forcedToolUse && (req.Thinking == nil || req.Thinking.Type == "adaptive") {
+				if budget := clampThinkingBudget(getThinkingBudgetTokensWithConfig(outputEffortMeta, config), req.MaxTokens); budget > 0 {
 					req.Thinking = &Thinking{
 						Type:         "enabled",
-						BudgetTokens: getThinkingBudgetTokensWithConfig(effort, config),
+						BudgetTokens: budget,
 					}
 				}
 			}
 		}
 	}
+
+	stripSamplingForThinking(req, chatReq)
 
 	// Restore Anthropic's top-level cache_control (automatic prompt caching).
 	// When present we keep it as-is on the upstream request and skip our own
@@ -203,9 +220,41 @@ func resolveMaxTokens(chatReq *llm.Request) int64 {
 	}
 }
 
-// buildThinking creates the Thinking configuration.
+// buildThinking creates the Thinking configuration. Returns nil when
+// max_tokens leaves no room for an effort-derived thinking budget.
 func buildThinking(chatReq *llm.Request, config *Config) *Thinking {
-	budgetTokens := lo.FromPtrOr(chatReq.ReasoningBudget, getThinkingBudgetTokensWithConfig(chatReq.ReasoningEffort, config))
+	maxTokens := resolveMaxTokens(chatReq)
+
+	if chatReq.ReasoningBudget != nil {
+		budget := *chatReq.ReasoningBudget
+
+		switch {
+		case budget >= minThinkingBudgetTokens:
+			// Explicit client budgets pass through untouched: with interleaved
+			// thinking they may legitimately exceed max_tokens.
+			return &Thinking{
+				Type:         "enabled",
+				BudgetTokens: budget,
+			}
+		case budget > 0:
+			// Below the API minimum (e.g. a small Gemini thinkingBudget); raise it.
+			if b := clampThinkingBudget(minThinkingBudgetTokens, maxTokens); b > 0 {
+				return &Thinking{Type: "enabled", BudgetTokens: b}
+			}
+
+			return nil
+		}
+		// Negative sentinel (Gemini dynamic thinking): fall through to the
+		// effort-derived budget. Zero (thinking off) is handled by the caller.
+	}
+
+	budgetTokens := clampThinkingBudget(
+		getThinkingBudgetTokensWithConfig(chatReq.ReasoningEffort, config),
+		maxTokens,
+	)
+	if budgetTokens <= 0 {
+		return nil
+	}
 
 	return &Thinking{
 		Type:         "enabled",
