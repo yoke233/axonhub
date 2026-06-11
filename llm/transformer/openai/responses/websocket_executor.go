@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -1025,6 +1026,21 @@ func newWebSocketDialError(request *httpclient.Request, resp *http.Response, err
 	}
 }
 
+// isAbruptWebSocketClose reports transport-level teardown errors that arrive
+// without a close frame: EOF, a closed socket, or a connection reset/abort
+// from the peer. Net-level read errors are matched as *net.OpError because
+// the peer-reset errno is platform-specific (Windows reports wsarecv
+// WSAECONNABORTED/WSAECONNRESET, which do not match the syscall constants).
+func isAbruptWebSocketClose(err error) bool {
+	var opErr *net.OpError
+
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.As(err, &opErr) ||
+		websocket.IsCloseError(err, websocket.CloseAbnormalClosure)
+}
+
 type webSocketStream struct {
 	ctx      context.Context
 	lease    *webSocketLease
@@ -1053,6 +1069,19 @@ func (s *webSocketStream) Next() bool {
 				s.setErr(ctxErr)
 			} else if !s.hasSeenEvent() {
 				s.setErr(fmt.Errorf("websocket closed before response event"))
+			}
+			s.finish(true)
+			return false
+		}
+		// A reused connection the server already tore down surfaces as an
+		// abrupt transport error instead of a close frame (on Windows the RST
+		// reads as "wsarecv: connection aborted" rather than EOF). Before any
+		// event this is the same stale-session case as a clean close.
+		if !s.hasSeenEvent() && isAbruptWebSocketClose(err) {
+			if ctxErr := s.ctx.Err(); ctxErr != nil {
+				s.setErr(ctxErr)
+			} else {
+				s.setErr(fmt.Errorf("websocket closed before response event: %w", err))
 			}
 			s.finish(true)
 			return false
