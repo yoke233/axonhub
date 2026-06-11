@@ -1041,6 +1041,28 @@ func TestFilterResponseCustomToolMessagesForNonResponsesOutbound(t *testing.T) {
 	})
 }
 
+func TestNormalizeReasoningEffortForOutbound(t *testing.T) {
+	t.Run("clones and maps max to xhigh for openai outbound", func(t *testing.T) {
+		req := &llm.Request{ReasoningEffort: "max"}
+		got := normalizeReasoningEffortForOutbound(req, llm.APIFormatOpenAIChatCompletion)
+		require.NotSame(t, req, got)
+		require.Equal(t, "xhigh", got.ReasoningEffort)
+		require.Equal(t, "max", req.ReasoningEffort)
+	})
+
+	t.Run("returns same request when effort is already valid", func(t *testing.T) {
+		req := &llm.Request{ReasoningEffort: "high"}
+		got := normalizeReasoningEffortForOutbound(req, llm.APIFormatOpenAIChatCompletion)
+		require.Same(t, req, got)
+	})
+
+	t.Run("returns same request for anthropic outbound", func(t *testing.T) {
+		req := &llm.Request{ReasoningEffort: "max"}
+		got := normalizeReasoningEffortForOutbound(req, llm.APIFormatAnthropicMessage)
+		require.Same(t, req, got)
+	})
+}
+
 // ========== 429 Retry-After Tests ==========
 
 func TestPersistentOutboundTransformer_CanRetry_429_WithRetryAfter(t *testing.T) {

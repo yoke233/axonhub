@@ -403,6 +403,7 @@ func (p *PersistentOutboundTransformer) TransformRequest(ctx context.Context, ll
 	// Apply channel transform options to create a new request
 	llmRequest = applyTransformOptions(llmRequest, candidate.Channel.Settings)
 	llmRequest = filterResponseCustomToolMessagesForNonResponsesOutbound(llmRequest, p.wrapped.APIFormat())
+	llmRequest = normalizeReasoningEffortForOutbound(llmRequest, p.wrapped.APIFormat())
 
 	if shouldForceStreamingForCandidate(candidate, llmRequest) {
 		streamPtr := lo.ToPtr(true)
@@ -437,6 +438,26 @@ func filterResponseCustomToolMessagesForNonResponsesOutbound(
 
 	cloned := *llmRequest
 	cloned.Messages = shared.FilterOutResponseCustomToolMessages(llmRequest.Messages)
+
+	return &cloned
+}
+
+// normalizeReasoningEffortForOutbound maps the reasoning effort to the target
+// outbound vocabulary (e.g. Anthropic "max" -> OpenAI "xhigh") so individual
+// outbound transformers stay protocol-pure. The request is cloned on change so
+// a later attempt against a different channel still sees the original effort.
+func normalizeReasoningEffortForOutbound(llmRequest *llm.Request, outboundFormat llm.APIFormat) *llm.Request {
+	if llmRequest == nil {
+		return nil
+	}
+
+	normalized := llm.NormalizeReasoningEffort(outboundFormat, llmRequest.ReasoningEffort)
+	if normalized == llmRequest.ReasoningEffort {
+		return llmRequest
+	}
+
+	cloned := *llmRequest
+	cloned.ReasoningEffort = normalized
 
 	return &cloned
 }
