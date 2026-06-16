@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/samber/lo"
+
+	"github.com/looplj/axonhub/llm"
 )
 
 // MessageRequest represents the Anthropic Messages API request format.
@@ -152,7 +154,7 @@ type SystemPromptPart struct {
 }
 
 // TransformerMetadataKeyThinkingType is the key for storing thinking type in TransformerMetadata.
-const TransformerMetadataKeyThinkingType = "thinking_type"
+const TransformerMetadataKeyThinkingType = llm.TransformerMetadataKeyThinkingType
 
 // TransformerMetadataKeyOutputConfigEffort is the key for storing output config effort in TransformerMetadata.
 const TransformerMetadataKeyOutputConfigEffort = "output_config_effort"

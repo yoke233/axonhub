@@ -780,6 +780,38 @@ func TestConvertReasoning(t *testing.T) {
 				Summary: "concise",
 			},
 		},
+		{
+			name: "thinking disabled metadata suppresses reasoning fields",
+			req: &llm.Request{
+				ReasoningEffort: "high",
+				ReasoningBudget: lo.ToPtr(int64(5000)),
+				TransformerMetadata: map[string]any{
+					llm.TransformerMetadataKeyThinkingType: "disabled",
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "thinking enabled metadata without effort or budget does not synthesize reasoning",
+			req: &llm.Request{
+				TransformerMetadata: map[string]any{
+					llm.TransformerMetadataKeyThinkingType: "enabled",
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "thinking enabled budget maps to reasoning max tokens",
+			req: &llm.Request{
+				ReasoningBudget: lo.ToPtr(int64(5000)),
+				TransformerMetadata: map[string]any{
+					llm.TransformerMetadataKeyThinkingType: "enabled",
+				},
+			},
+			expected: &Reasoning{
+				MaxTokens: lo.ToPtr(int64(5000)),
+			},
+		},
 	}
 
 	for _, tt := range tests {

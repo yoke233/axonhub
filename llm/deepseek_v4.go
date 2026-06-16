@@ -21,6 +21,17 @@ func ResolveDeepSeekV4ThinkingControl(req *Request) (DeepSeekV4ThinkingControl, 
 		return DeepSeekV4ThinkingControl{}, false
 	}
 
+	switch RequestThinkingType(req) {
+	case "disabled":
+		return DeepSeekV4ThinkingControl{Enabled: false}, true
+	case "enabled", "adaptive":
+		effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
+		return DeepSeekV4ThinkingControl{
+			Enabled: true,
+			Effort:  normalizeDeepSeekV4ReasoningEffort(effort, isAgenticRequest(req)),
+		}, true
+	}
+
 	effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
 	if effort == "none" {
 		return DeepSeekV4ThinkingControl{Enabled: false}, true

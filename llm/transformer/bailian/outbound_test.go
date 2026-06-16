@@ -3,6 +3,7 @@ package bailian
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/samber/lo"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
+	"github.com/looplj/axonhub/llm/httpclient"
+	anthropictransformer "github.com/looplj/axonhub/llm/transformer/anthropic"
 	"github.com/looplj/axonhub/llm/transformer/openai"
 )
 
@@ -164,4 +167,107 @@ func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBailianTransformRequest_AnthropicThinkingMetadata(t *testing.T) {
+	transformer, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name               string
+		thinkingType       string
+		reasoningEffort    string
+		wantExists         bool
+		wantEnableThinking bool
+	}{
+		{
+			name:               "enabled thinking maps to DashScope enable_thinking",
+			thinkingType:       "enabled",
+			reasoningEffort:    "high",
+			wantExists:         true,
+			wantEnableThinking: true,
+		},
+		{
+			name:               "adaptive thinking maps to DashScope enable_thinking",
+			thinkingType:       "adaptive",
+			reasoningEffort:    "high",
+			wantExists:         true,
+			wantEnableThinking: true,
+		},
+		{
+			name:               "disabled thinking maps to DashScope disable thinking",
+			thinkingType:       "disabled",
+			reasoningEffort:    "none",
+			wantExists:         true,
+			wantEnableThinking: false,
+		},
+		{
+			name:            "missing Anthropic thinking metadata leaves DashScope field absent",
+			reasoningEffort: "high",
+			wantExists:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &llm.Request{
+				Model:           "qwen3.7-max-2026-06-08",
+				ReasoningEffort: tt.reasoningEffort,
+				Messages:        []llm.Message{{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("hi")}}},
+			}
+			if tt.thinkingType != "" {
+				req.TransformerMetadata = map[string]any{
+					anthropictransformer.TransformerMetadataKeyThinkingType: tt.thinkingType,
+				}
+			}
+
+			httpReq, err := transformer.TransformRequest(context.Background(), req)
+			require.NoError(t, err)
+
+			body := string(httpReq.Body)
+			enableThinking := gjson.Get(body, "enable_thinking")
+			require.Equal(t, tt.wantExists, enableThinking.Exists())
+			if tt.wantExists {
+				require.Equal(t, tt.wantEnableThinking, enableThinking.Bool())
+				require.False(t, gjson.Get(body, "reasoning_effort").Exists())
+			}
+		})
+	}
+}
+
+func TestBailianTransformRequest_AnthropicInboundThinkingToDashScope(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 1024,
+			"thinking": {
+				"type": "enabled",
+				"budget_tokens": 1024
+			},
+			"messages": [
+				{"role": "user", "content": "hi"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "qwen3.7-max-2026-06-08"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.True(t, gjson.Get(body, "enable_thinking").Bool())
+	require.False(t, gjson.Get(body, "reasoning_effort").Exists())
 }

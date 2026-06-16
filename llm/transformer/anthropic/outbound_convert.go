@@ -148,11 +148,6 @@ func buildBaseRequest(chatReq *llm.Request, config *Config) *MessageRequest {
 			if !isClaudeOmitDisabledThinkingModel(chatReq.Model) {
 				req.Thinking = &Thinking{Type: "disabled"}
 			}
-		case "adaptive":
-			// Reaching the generic path means the target does not support
-			// thinking.type = "adaptive" (supported model/platform pairs are
-			// handled in applyClaudeAdaptiveThinking): leave it unset so the
-			// effort/budget fallback below degrades it to enabled+budget_tokens.
 		}
 
 		// Handle ReasoningEffort="none" as disabled thinking (e.g., from OpenAI inbound)

@@ -63,6 +63,14 @@ func isClaudeAdaptivePreferredThinkingModel(model string) bool {
 		strings.HasPrefix(model, "claude-sonnet-4-6")
 }
 
+func isClaudeAdaptiveThinkingModel(model string) bool {
+	model = normalizeClaudeModelID(model)
+	return strings.HasPrefix(model, "claude-opus-4") ||
+		strings.HasPrefix(model, "claude-sonnet-4") ||
+		isClaudeAdaptiveOnlyThinkingModel(model) ||
+		isClaudeAdaptivePreferredThinkingModel(model)
+}
+
 // isClaudeOmitDisabledThinkingModel reports models that reject an explicit
 // thinking.type = "disabled" (400); omitting the thinking field is the only
 // way to express "no manual thinking config" there.
@@ -139,12 +147,14 @@ func applyClaudeAdaptiveThinking(req *MessageRequest, chatReq *llm.Request, conf
 		return false
 	}
 
+	thinkingType, _ := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string)
 	adaptiveOnly := isClaudeAdaptiveOnlyThinkingModel(chatReq.Model)
-	if !supportsAdaptiveThinking(config) || (!adaptiveOnly && !isClaudeAdaptivePreferredThinkingModel(chatReq.Model)) {
+	if !supportsAdaptiveThinking(config) ||
+		(!adaptiveOnly && !isClaudeAdaptivePreferredThinkingModel(chatReq.Model) &&
+			!(thinkingType == "adaptive" && isClaudeAdaptiveThinkingModel(chatReq.Model))) {
 		return false
 	}
 
-	thinkingType, _ := chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType].(string)
 	outputEffort, hasOutputEffort := chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort].(string)
 	effort := normalizeEffortValue(chatReq.ReasoningEffort)
 

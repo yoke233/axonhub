@@ -331,31 +331,25 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 		chatReq.ToolChoice = convertAnthropicToolChoiceToLLM(anthropicReq.ToolChoice)
 	}
 
-	// Convert thinking configuration to reasoning effort and preserve budget
+	// Convert thinking configuration. Keep thinking on/off separate from
+	// output_config.effort; effort is a soft output-level control, not the
+	// thinking switch.
 	if anthropicReq.Thinking != nil {
 		switch anthropicReq.Thinking.Type {
 		case "disabled":
 			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "disabled"
-			chatReq.ReasoningEffort = "none"
 		case "enabled":
 			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "enabled"
 
 			if anthropicReq.Thinking.BudgetTokens > 0 {
-				chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
 				chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)
-			} else {
-				chatReq.ReasoningEffort = "high"
 			}
 
 			if anthropicReq.Thinking.Display != "" {
 				chatReq.TransformerMetadata[TransformerMetadataKeyThinkingDisplay] = anthropicReq.Thinking.Display
 			}
 		case "adaptive":
-			// Adaptive thinking doesn't require a budget; preserve the type marker via TransformerMetadata.
 			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "adaptive"
-			// Set a default reasoning effort so other outbound transformers (e.g., OpenAI) can use it.
-			// Anthropic's official default for adaptive thinking is "high".
-			chatReq.ReasoningEffort = "high"
 
 			if anthropicReq.Thinking.Display != "" {
 				chatReq.TransformerMetadata[TransformerMetadataKeyThinkingDisplay] = anthropicReq.Thinking.Display

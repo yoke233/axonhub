@@ -340,7 +340,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					BudgetTokens: 5000,
 				},
 			},
-			expectedEffort: "low",
+			expectedEffort: "",
 		},
 		{
 			name: "thinking enabled with medium budget",
@@ -360,7 +360,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					BudgetTokens: 15000,
 				},
 			},
-			expectedEffort: "medium",
+			expectedEffort: "",
 		},
 		{
 			name: "thinking enabled with high budget",
@@ -380,7 +380,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					BudgetTokens: 30000,
 				},
 			},
-			expectedEffort: "high",
+			expectedEffort: "",
 		},
 		{
 			name: "thinking disabled",
@@ -399,7 +399,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					Type: "disabled",
 				},
 			},
-			expectedEffort: "none",
+			expectedEffort: "",
 		},
 		{
 			name: "no thinking configuration",
@@ -435,7 +435,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					BudgetTokens: 3000,
 				},
 			},
-			expectedEffort: "low",
+			expectedEffort: "",
 		},
 		{
 			name: "thinking enabled with custom budget (high range)",
@@ -455,7 +455,7 @@ func TestInboundTransformer_ThinkingTransform(t *testing.T) {
 					BudgetTokens: 20000,
 				},
 			},
-			expectedEffort: "high",
+			expectedEffort: "",
 		},
 	}
 
@@ -571,6 +571,28 @@ func TestThinking_AdaptiveOutbound(t *testing.T) {
 				require.NotNil(t, anthropicReq.Thinking)
 				require.Equal(t, "enabled", anthropicReq.Thinking.Type)
 				require.Equal(t, int64(30000), anthropicReq.Thinking.BudgetTokens)
+			},
+		},
+		{
+			name: "metadata thinking_type=adaptive on unsupported model without controls omits thinking",
+			chatReq: &llm.Request{
+				Model:     "claude-3-sonnet-20240229",
+				MaxTokens: lo.ToPtr(int64(4096)),
+				Messages: []llm.Message{
+					{
+						Role: "user",
+						Content: llm.MessageContent{
+							Content: lo.ToPtr("Hello"),
+						},
+					},
+				},
+				TransformerMetadata: map[string]any{
+					TransformerMetadataKeyThinkingType: "adaptive",
+				},
+			},
+			validate: func(t *testing.T, anthropicReq *MessageRequest) {
+				t.Helper()
+				require.Nil(t, anthropicReq.Thinking)
 			},
 		},
 		{
@@ -969,12 +991,12 @@ func TestThinking_AdaptiveInbound(t *testing.T) {
 				t.Helper()
 				require.NotNil(t, chatReq.TransformerMetadata)
 				require.Equal(t, "adaptive", chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType])
-				require.Equal(t, "high", chatReq.ReasoningEffort)
+				require.Empty(t, chatReq.ReasoningEffort)
 				require.Nil(t, chatReq.ReasoningBudget)
 			},
 		},
 		{
-			name: "Thinking{Type: disabled} -> TransformerMetadata thinking_type=disabled and ReasoningEffort=none",
+			name: "Thinking{Type: disabled} -> TransformerMetadata thinking_type=disabled",
 			anthropicReq: &MessageRequest{
 				Model:     "claude-3-sonnet-20240229",
 				MaxTokens: 4096,
@@ -992,7 +1014,7 @@ func TestThinking_AdaptiveInbound(t *testing.T) {
 				t.Helper()
 				require.NotNil(t, chatReq.TransformerMetadata)
 				require.Equal(t, "disabled", chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType])
-				require.Equal(t, "none", chatReq.ReasoningEffort)
+				require.Empty(t, chatReq.ReasoningEffort)
 				require.Nil(t, chatReq.ReasoningBudget)
 			},
 		},
@@ -1239,7 +1261,7 @@ func TestInboundAnthropicToOpenAIDeepSeekV4ThinkingShape(t *testing.T) {
 		wantNoBudgetToken bool
 	}{
 		{
-			name: "thinking enabled without budget uses OpenAI reasoning effort",
+			name: "thinking enabled without budget keeps provider default reasoning effort",
 			body: `{
 				"model": "deepseek-v4-pro",
 				"max_tokens": 64,
@@ -1523,8 +1545,12 @@ func TestInboundTransformer_ThinkingWithOtherFields(t *testing.T) {
 		t.Errorf("TopP mismatch: expected %f, got %f", *anthropicReq.TopP, *chatReq.TopP)
 	}
 
-	if chatReq.ReasoningEffort != "medium" {
-		t.Errorf("ReasoningEffort mismatch: expected medium, got %s", chatReq.ReasoningEffort)
+	if chatReq.ReasoningEffort != "" {
+		t.Errorf("ReasoningEffort mismatch: expected empty, got %s", chatReq.ReasoningEffort)
+	}
+
+	if chatReq.ReasoningBudget == nil || *chatReq.ReasoningBudget != anthropicReq.Thinking.BudgetTokens {
+		t.Errorf("ReasoningBudget mismatch: expected %d, got %v", anthropicReq.Thinking.BudgetTokens, chatReq.ReasoningBudget)
 	}
 
 	if len(chatReq.Messages) != 1 {

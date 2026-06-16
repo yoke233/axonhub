@@ -66,6 +66,47 @@ func TestRequestFromLLM(t *testing.T) {
 				// OpenAI Request doesn't have MessageIndex or RawAPIFormat fields
 			},
 		},
+		{
+			name: "thinking disabled metadata clears reasoning effort",
+			llmReq: &llm.Request{
+				Model:           "gpt-4o",
+				ReasoningEffort: "high",
+				Messages: []llm.Message{
+					{
+						Role:    "user",
+						Content: llm.MessageContent{Content: lo.ToPtr("hi")},
+					},
+				},
+				TransformerMetadata: map[string]any{
+					llm.TransformerMetadataKeyThinkingType: "disabled",
+				},
+			},
+			validate: func(t *testing.T, req *Request) {
+				require.NotNil(t, req)
+				require.Empty(t, req.ReasoningEffort)
+				require.Nil(t, req.Thinking)
+			},
+		},
+		{
+			name: "thinking enabled metadata does not synthesize reasoning effort",
+			llmReq: &llm.Request{
+				Model: "gpt-4o",
+				Messages: []llm.Message{
+					{
+						Role:    "user",
+						Content: llm.MessageContent{Content: lo.ToPtr("hi")},
+					},
+				},
+				TransformerMetadata: map[string]any{
+					llm.TransformerMetadataKeyThinkingType: "enabled",
+				},
+			},
+			validate: func(t *testing.T, req *Request) {
+				require.NotNil(t, req)
+				require.Empty(t, req.ReasoningEffort)
+				require.Nil(t, req.Thinking)
+			},
+		},
 	}
 
 	for _, tt := range tests {

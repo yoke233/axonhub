@@ -515,11 +515,13 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 		got, err := transformer.TransformRequest(t.Context(), req)
 		require.NoError(t, err)
 		require.NotNil(t, got)
-		require.Equal(t, "none", got.ReasoningEffort)
+		require.Empty(t, got.ReasoningEffort)
+		require.NotNil(t, got.TransformerMetadata)
+		require.Equal(t, "disabled", got.TransformerMetadata[TransformerMetadataKeyThinkingType])
 		require.Nil(t, got.ReasoningBudget)
 	})
 
-	t.Run("thinking enabled defaults effort when budget_tokens is omitted", func(t *testing.T) {
+	t.Run("thinking enabled without budget_tokens does not imply effort", func(t *testing.T) {
 		req := mkReq(`{
 			"model": "claude-sonnet-4-5-20250929",
 			"max_tokens": 1024,
@@ -530,7 +532,9 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 		got, err := transformer.TransformRequest(t.Context(), req)
 		require.NoError(t, err)
 		require.NotNil(t, got)
-		require.Equal(t, "high", got.ReasoningEffort)
+		require.Empty(t, got.ReasoningEffort)
+		require.NotNil(t, got.TransformerMetadata)
+		require.Equal(t, "enabled", got.TransformerMetadata[TransformerMetadataKeyThinkingType])
 		require.Nil(t, got.ReasoningBudget)
 	})
 
@@ -560,6 +564,7 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		require.Equal(t, lo.ToPtr(int64(15000)), got.ReasoningBudget)
+		require.Empty(t, got.ReasoningEffort)
 	})
 
 	t.Run("thinking adaptive without output_config is accepted", func(t *testing.T) {
@@ -577,7 +582,7 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 		require.Equal(t, "adaptive", got.TransformerMetadata[TransformerMetadataKeyThinkingType])
 		_, hasEffort := got.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort]
 		require.False(t, hasEffort)
-		require.Equal(t, "high", got.ReasoningEffort)
+		require.Empty(t, got.ReasoningEffort)
 	})
 
 	t.Run("thinking adaptive requires valid output_config.effort", func(t *testing.T) {

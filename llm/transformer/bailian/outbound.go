@@ -12,6 +12,7 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
+	anthropictransformer "github.com/looplj/axonhub/llm/transformer/anthropic"
 	"github.com/looplj/axonhub/llm/transformer/openai"
 )
 
@@ -69,25 +70,29 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, err
 	}
 
-	applyBailianDeepSeekV4Thinking(req, llmReq)
+	if applyBailianDeepSeekV4Thinking(req, llmReq) {
+		return req, nil
+	}
+
+	applyBailianAnthropicThinking(req, llmReq)
 
 	return req, nil
 }
 
-func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Request) {
+func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Request) bool {
 	control, ok := llm.ResolveDeepSeekV4ThinkingControl(llmReq)
 	if !ok || httpReq == nil || len(httpReq.Body) == 0 {
-		return
+		return false
 	}
 
 	body, err := sjson.DeleteBytes(httpReq.Body, "thinking")
 	if err != nil {
-		return
+		return true
 	}
 
 	body, err = sjson.SetBytes(body, "enable_thinking", control.Enabled)
 	if err != nil {
-		return
+		return true
 	}
 
 	if control.Enabled {
@@ -96,10 +101,46 @@ func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Req
 		body, err = sjson.DeleteBytes(body, "reasoning_effort")
 	}
 	if err != nil {
-		return
+		return true
 	}
 
 	httpReq.Body = body
+
+	return true
+}
+
+func applyBailianAnthropicThinking(httpReq *httpclient.Request, llmReq *llm.Request) {
+	if httpReq == nil || llmReq == nil || len(httpReq.Body) == 0 {
+		return
+	}
+
+	thinkingType, _ := llmReq.TransformerMetadata[anthropictransformer.TransformerMetadataKeyThinkingType].(string)
+	switch strings.ToLower(strings.TrimSpace(thinkingType)) {
+	case "enabled", "adaptive":
+		body, err := sjson.SetBytes(httpReq.Body, "enable_thinking", true)
+		if err != nil {
+			return
+		}
+
+		body, err = sjson.DeleteBytes(body, "reasoning_effort")
+		if err != nil {
+			return
+		}
+
+		httpReq.Body = body
+	case "disabled":
+		body, err := sjson.SetBytes(httpReq.Body, "enable_thinking", false)
+		if err != nil {
+			return
+		}
+
+		body, err = sjson.DeleteBytes(body, "reasoning_effort")
+		if err != nil {
+			return
+		}
+
+		httpReq.Body = body
+	}
 }
 
 func mergeConsecutiveToolCallMessages(req *llm.Request) *llm.Request {

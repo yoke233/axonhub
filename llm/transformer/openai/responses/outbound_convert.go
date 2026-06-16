@@ -502,6 +502,10 @@ func convertStreamOptions(src *llm.StreamOptions, metadata map[string]any) *Stre
 // Only one of "reasoning.effort" and "reasoning.max_tokens" can be specified.
 // Priority is given to effort when both are present.
 func convertReasoning(req *llm.Request) *Reasoning {
+	if req == nil || llm.RequestThinkingType(req) == "disabled" {
+		return nil
+	}
+
 	// Check if any reasoning-related fields are present
 	hasReasoningFields := req.ReasoningEffort != "" ||
 		req.ReasoningBudget != nil ||

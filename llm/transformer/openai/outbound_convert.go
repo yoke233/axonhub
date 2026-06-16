@@ -65,6 +65,7 @@ func RequestFromLLM(r *llm.Request, reasoningField ReasoningField) *Request {
 	})
 
 	applyDeepSeekV4Thinking(req, r)
+	applyThinkingTypeMetadata(req, r)
 
 	// Convert ToolChoice
 	if r.ToolChoice != nil {
@@ -94,6 +95,16 @@ func RequestFromLLM(r *llm.Request, reasoningField ReasoningField) *Request {
 	}
 
 	return req
+}
+
+func applyThinkingTypeMetadata(req *Request, src *llm.Request) {
+	if req == nil || src == nil {
+		return
+	}
+
+	if llm.RequestThinkingType(src) == "disabled" {
+		req.ReasoningEffort = ""
+	}
 }
 
 // MessageFromLLM creates OpenAI Message from unified llm.Message.
