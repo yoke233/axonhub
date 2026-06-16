@@ -271,3 +271,120 @@ func TestBailianTransformRequest_AnthropicInboundThinkingToDashScope(t *testing.
 	require.True(t, gjson.Get(body, "enable_thinking").Bool())
 	require.False(t, gjson.Get(body, "reasoning_effort").Exists())
 }
+
+func TestBailianTransformRequest_AnthropicInboundCacheControl(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 1024,
+			"system": [
+				{"type": "text", "text": "stable system prompt", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+			],
+			"messages": [
+				{
+					"role": "user",
+					"content": [
+						{"type": "text", "text": "stable user context", "cache_control": {"type": "ephemeral"}},
+						{"type": "text", "text": "dynamic question"}
+					]
+				}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "qwen3.7-max"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.False(t, gjson.Get(body, "prompt_cache_key").Exists())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.0.content.0.cache_control.type").String())
+	require.False(t, gjson.Get(body, "messages.0.content.0.cache_control.ttl").Exists())
+	require.Equal(t, "stable system prompt", gjson.Get(body, "messages.0.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.1.content.0.cache_control.type").String())
+	require.Equal(t, "stable user context", gjson.Get(body, "messages.1.content.0.text").String())
+	require.False(t, gjson.Get(body, "messages.1.content.1.cache_control").Exists())
+}
+
+func TestBailianTransformRequest_AnthropicTopLevelCacheControlFallsBackToLastMessage(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 1024,
+			"cache_control": {"type": "ephemeral"},
+			"system": "stable system prompt",
+			"messages": [
+				{"role": "user", "content": "latest question"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "qwen3.7-max"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.False(t, gjson.Get(body, "prompt_cache_key").Exists())
+	require.Equal(t, "latest question", gjson.Get(body, "messages.1.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.1.content.0.cache_control.type").String())
+}
+
+func TestBailianTransformRequest_AnthropicToolCacheControlUsesMessageAnchor(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 1024,
+			"system": "stable system prompt",
+			"tools": [
+				{
+					"name": "get_weather",
+					"description": "Get weather",
+					"input_schema": {"type": "object"},
+					"cache_control": {"type": "ephemeral"}
+				}
+			],
+			"messages": [
+				{"role": "user", "content": "latest question"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "qwen3.7-max"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.Equal(t, "stable system prompt", gjson.Get(body, "messages.0.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.0.content.0.cache_control.type").String())
+	require.False(t, gjson.Get(body, "tools.0.cache_control").Exists())
+}

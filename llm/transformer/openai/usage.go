@@ -4,8 +4,9 @@ import "github.com/looplj/axonhub/llm"
 
 // PromptTokensDetails Breakdown of tokens used in the prompt.
 type PromptTokensDetails struct {
-	AudioTokens  int64 `json:"audio_tokens"`
-	CachedTokens int64 `json:"cached_tokens"`
+	AudioTokens              int64 `json:"audio_tokens"`
+	CachedTokens             int64 `json:"cached_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
 	// hidden field, used for internal calculation.
 	WriteCachedTokens int64 `json:"write_cached_tokens,omitempty"`
 }
@@ -43,10 +44,15 @@ func (u *Usage) ToLLMUsage() *llm.Usage {
 	}
 
 	if u.PromptTokensDetails != (PromptTokensDetails{}) {
+		writeCachedTokens := u.PromptTokensDetails.WriteCachedTokens
+		if writeCachedTokens == 0 {
+			writeCachedTokens = u.PromptTokensDetails.CacheCreationInputTokens
+		}
+
 		usage.PromptTokensDetails = &llm.PromptTokensDetails{
 			AudioTokens:       u.PromptTokensDetails.AudioTokens,
 			CachedTokens:      u.PromptTokensDetails.CachedTokens,
-			WriteCachedTokens: u.PromptTokensDetails.WriteCachedTokens,
+			WriteCachedTokens: writeCachedTokens,
 		}
 	}
 

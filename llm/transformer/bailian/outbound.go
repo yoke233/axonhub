@@ -2,6 +2,7 @@ package bailian
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -70,6 +71,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, err
 	}
 
+	applyBailianAnthropicCacheControl(req, llmReq)
+
 	if applyBailianDeepSeekV4Thinking(req, llmReq) {
 		return req, nil
 	}
@@ -77,6 +80,258 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	applyBailianAnthropicThinking(req, llmReq)
 
 	return req, nil
+}
+
+const maxBailianCacheControlBreakpoints = 4
+
+func applyBailianAnthropicCacheControl(httpReq *httpclient.Request, llmReq *llm.Request) {
+	if httpReq == nil || llmReq == nil || len(httpReq.Body) == 0 || llmReq.APIFormat != llm.APIFormatAnthropicMessage {
+		return
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(httpReq.Body, &body); err != nil {
+		return
+	}
+
+	delete(body, "prompt_cache_key")
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		updated, err := json.Marshal(body)
+		if err == nil {
+			httpReq.Body = updated
+		}
+
+		return
+	}
+
+	applied := 0
+	for i, msg := range llmReq.Messages {
+		if applied >= maxBailianCacheControlBreakpoints || i >= len(messages) {
+			break
+		}
+
+		if msg.CacheControl != nil && applyBailianCacheControlToMessage(messages, i, msg.CacheControl) {
+			applied++
+		}
+
+		for partIdx, part := range msg.Content.MultipleContent {
+			if applied >= maxBailianCacheControlBreakpoints {
+				break
+			}
+
+			if part.CacheControl != nil && applyBailianCacheControlToContentPart(messages, i, partIdx, part, part.CacheControl) {
+				applied++
+			}
+		}
+	}
+
+	if applied == 0 {
+		if cc := bailianCacheControlFromMetadata(llmReq); cc != nil {
+			if applyBailianCacheControlToLastCacheableMessage(messages, cc) {
+				applied++
+			}
+		}
+	}
+
+	if applied == 0 {
+		if cc := firstToolCacheControl(llmReq); cc != nil {
+			_ = applyBailianCacheControlToStructuralAnchor(messages, cc)
+		}
+	}
+
+	updated, err := json.Marshal(body)
+	if err != nil {
+		return
+	}
+
+	httpReq.Body = updated
+}
+
+func applyBailianCacheControlToMessage(messages []any, msgIndex int, cc *llm.CacheControl) bool {
+	msg, ok := messageObject(messages, msgIndex)
+	if !ok {
+		return false
+	}
+
+	switch content := msg["content"].(type) {
+	case string:
+		if content == "" {
+			return false
+		}
+
+		msg["content"] = []any{map[string]any{
+			"type":          "text",
+			"text":          content,
+			"cache_control": bailianCacheControlPayload(cc),
+		}}
+
+		return true
+	case []any:
+		for i := len(content) - 1; i >= 0; i-- {
+			part, ok := content[i].(map[string]any)
+			if !ok || !isBailianCacheableContentPart(part) {
+				continue
+			}
+
+			part["cache_control"] = bailianCacheControlPayload(cc)
+			return true
+		}
+	}
+
+	return false
+}
+
+func applyBailianCacheControlToContentPart(messages []any, msgIndex, partIndex int, llmPart llm.MessageContentPart, cc *llm.CacheControl) bool {
+	msg, ok := messageObject(messages, msgIndex)
+	if !ok {
+		return false
+	}
+
+	switch content := msg["content"].(type) {
+	case string:
+		if partIndex != 0 || llmPart.Type != "text" || llmPart.Text == nil || content == "" {
+			return false
+		}
+
+		msg["content"] = []any{map[string]any{
+			"type":          "text",
+			"text":          content,
+			"cache_control": bailianCacheControlPayload(cc),
+		}}
+
+		return true
+	case []any:
+		if partIndex < 0 || partIndex >= len(content) {
+			return false
+		}
+
+		part, ok := content[partIndex].(map[string]any)
+		if !ok || !isBailianCacheableContentPart(part) {
+			return false
+		}
+
+		part["cache_control"] = bailianCacheControlPayload(cc)
+		return true
+	}
+
+	return false
+}
+
+func applyBailianCacheControlToLastCacheableMessage(messages []any, cc *llm.CacheControl) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if applyBailianCacheControlToMessage(messages, i, cc) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func applyBailianCacheControlToStructuralAnchor(messages []any, cc *llm.CacheControl) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg, ok := messageObject(messages, i)
+		if !ok {
+			continue
+		}
+
+		role, _ := msg["role"].(string)
+		if role != "system" && role != "developer" {
+			continue
+		}
+
+		if applyBailianCacheControlToMessage(messages, i, cc) {
+			return true
+		}
+	}
+
+	for i := range messages {
+		if applyBailianCacheControlToMessage(messages, i, cc) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func messageObject(messages []any, msgIndex int) (map[string]any, bool) {
+	if msgIndex < 0 || msgIndex >= len(messages) {
+		return nil, false
+	}
+
+	msg, ok := messages[msgIndex].(map[string]any)
+	return msg, ok
+}
+
+func isBailianCacheableContentPart(part map[string]any) bool {
+	partType, _ := part["type"].(string)
+	if partType == "text" {
+		text, _ := part["text"].(string)
+		return text != ""
+	}
+
+	return partType != ""
+}
+
+func bailianCacheControlPayload(cc *llm.CacheControl) map[string]any {
+	cacheType := "ephemeral"
+	if cc != nil && strings.TrimSpace(cc.Type) != "" {
+		cacheType = strings.TrimSpace(cc.Type)
+	}
+
+	return map[string]any{"type": cacheType}
+}
+
+func bailianCacheControlFromMetadata(req *llm.Request) *llm.CacheControl {
+	if req == nil || req.TransformerMetadata == nil {
+		return nil
+	}
+
+	raw := req.TransformerMetadata[anthropictransformer.TransformerMetadataKeyCacheControl]
+	switch cc := raw.(type) {
+	case *llm.CacheControl:
+		return cc
+	case llm.CacheControl:
+		return &cc
+	case *anthropictransformer.CacheControl:
+		if cc == nil {
+			return nil
+		}
+
+		return &llm.CacheControl{Type: cc.Type, TTL: cc.TTL}
+	case anthropictransformer.CacheControl:
+		return &llm.CacheControl{Type: cc.Type, TTL: cc.TTL}
+	case map[string]any:
+		cacheType, _ := cc["type"].(string)
+		ttl, _ := cc["ttl"].(string)
+
+		return &llm.CacheControl{Type: cacheType, TTL: ttl}
+	default:
+		return nil
+	}
+}
+
+func firstToolCacheControl(req *llm.Request) *llm.CacheControl {
+	if req == nil {
+		return nil
+	}
+
+	for _, tool := range req.Tools {
+		if tool.CacheControl != nil {
+			return tool.CacheControl
+		}
+	}
+
+	for _, msg := range req.Messages {
+		for _, toolCall := range msg.ToolCalls {
+			if toolCall.CacheControl != nil {
+				return toolCall.CacheControl
+			}
+		}
+	}
+
+	return nil
 }
 
 func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Request) bool {

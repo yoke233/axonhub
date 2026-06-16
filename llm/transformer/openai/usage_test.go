@@ -205,6 +205,27 @@ func TestUsage_ToLLMUsage(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "usage with Bailian cache creation tokens",
+			usage: &Usage{
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				TotalTokens:      150,
+				PromptTokensDetails: PromptTokensDetails{
+					CachedTokens:             20,
+					CacheCreationInputTokens: 5,
+				},
+			},
+			expected: &llm.Usage{
+				PromptTokens:     100,
+				CompletionTokens: 50,
+				TotalTokens:      150,
+				PromptTokensDetails: &llm.PromptTokensDetails{
+					CachedTokens:      20,
+					WriteCachedTokens: 5,
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
