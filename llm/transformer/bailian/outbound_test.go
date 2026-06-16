@@ -94,6 +94,49 @@ func TestBailianTransformRequest_MergeConsecutiveToolCalls(t *testing.T) {
 	require.Equal(t, callTwo, *oaiReq.Messages[3].ToolCallID)
 }
 
+func TestBailianTransformRequest_ToolMessageImageContentStripped(t *testing.T) {
+	transformer, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	callID := "call_view_image"
+	req := &llm.Request{
+		Model: "qwen3.7-max",
+		Messages: []llm.Message{
+			{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("inspect image")}},
+			{
+				Role: "assistant",
+				ToolCalls: []llm.ToolCall{{
+					ID:   callID,
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "ViewImage",
+						Arguments: `{"path":"complaint_p1.png"}`,
+					},
+				}},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: &callID,
+				Content: llm.MessageContent{MultipleContent: []llm.MessageContentPart{
+					{Type: "text", Text: lo.ToPtr("Image: complaint_p1.png (image/png, 766 KB)")},
+					{Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,AAAA"}},
+				}},
+			},
+		},
+	}
+
+	httpReq, err := transformer.TransformRequest(context.Background(), req)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.Equal(t, "Image: complaint_p1.png (image/png, 766 KB)", gjson.Get(body, "messages.2.content").String())
+	require.False(t, gjson.Get(body, "messages.2.content.0.type").Exists())
+	require.NotContains(t, body, "image_url")
+}
+
 func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
 	transformer, err := NewOutboundTransformerWithConfig(&Config{
 		BaseURL:        "https://example.com",

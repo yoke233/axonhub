@@ -72,6 +72,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	applyBailianAnthropicCacheControl(req, llmReq)
+	applyBailianToolMessageContentCompatibility(req)
 
 	if applyBailianDeepSeekV4Thinking(req, llmReq) {
 		return req, nil
@@ -155,6 +156,10 @@ func applyBailianCacheControlToMessage(messages []any, msgIndex int, cc *llm.Cac
 		return false
 	}
 
+	if role, _ := msg["role"].(string); role == "tool" {
+		return false
+	}
+
 	switch content := msg["content"].(type) {
 	case string:
 		if content == "" {
@@ -186,6 +191,10 @@ func applyBailianCacheControlToMessage(messages []any, msgIndex int, cc *llm.Cac
 func applyBailianCacheControlToContentPart(messages []any, msgIndex, partIndex int, llmPart llm.MessageContentPart, cc *llm.CacheControl) bool {
 	msg, ok := messageObject(messages, msgIndex)
 	if !ok {
+		return false
+	}
+
+	if role, _ := msg["role"].(string); role == "tool" {
 		return false
 	}
 
@@ -253,6 +262,72 @@ func applyBailianCacheControlToStructuralAnchor(messages []any, cc *llm.CacheCon
 	}
 
 	return false
+}
+
+func applyBailianToolMessageContentCompatibility(httpReq *httpclient.Request) {
+	if httpReq == nil || len(httpReq.Body) == 0 {
+		return
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(httpReq.Body, &body); err != nil {
+		return
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		return
+	}
+
+	changed := false
+	for _, rawMsg := range messages {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		role, _ := msg["role"].(string)
+		if role != "tool" {
+			continue
+		}
+
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+
+		texts := make([]string, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			partType, _ := part["type"].(string)
+			if partType != "text" {
+				continue
+			}
+
+			text, _ := part["text"].(string)
+			if text != "" {
+				texts = append(texts, text)
+			}
+		}
+
+		msg["content"] = strings.Join(texts, "\n")
+		changed = true
+	}
+
+	if !changed {
+		return
+	}
+
+	updated, err := json.Marshal(body)
+	if err != nil {
+		return
+	}
+
+	httpReq.Body = updated
 }
 
 func messageObject(messages []any, msgIndex int) (map[string]any, bool) {
