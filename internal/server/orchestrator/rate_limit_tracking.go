@@ -19,7 +19,8 @@ import (
 // Mirrors how real OpenAI clients back off when the subscription is flagged.
 const codexAuthFailureCooldown = 6 * time.Hour
 
-// withRateLimitTracking creates a middleware that tracks request counts per channel for rate limiting.
+// withRateLimitTracking creates a middleware that tracks token usage and
+// provider cooldown signals for rate limiting.
 func withRateLimitTracking(outbound *PersistentOutboundTransformer, tracker *ChannelRequestTracker) pipeline.Middleware {
 	if tracker == nil {
 		return &noopRateLimitTracking{}
@@ -31,7 +32,9 @@ func withRateLimitTracking(outbound *PersistentOutboundTransformer, tracker *Cha
 	}
 }
 
-// rateLimitTracking is a middleware that increments request count for rate limiting.
+// rateLimitTracking records TPM usage and provider Retry-After cooldowns. RPM
+// accounting is owned by rateLimitAdmissionMiddleware so request slots are
+// consumed atomically before an attempt reaches upstream.
 type rateLimitTracking struct {
 	pipeline.DummyMiddleware
 
@@ -60,25 +63,6 @@ func (m *rateLimitTracking) clearRecoveredUnauthorizedCooldown(ctx context.Conte
 			log.String("channel_name", channel.Name),
 		)
 	}
-}
-
-func (m *rateLimitTracking) OnOutboundRawRequest(ctx context.Context, request *httpclient.Request) (*httpclient.Request, error) {
-	channel := m.outbound.GetCurrentChannel()
-	if channel == nil {
-		return request, nil
-	}
-
-	m.tracker.IncrementRequest(channel.ID)
-
-	if log.DebugEnabled(ctx) {
-		log.Debug(ctx, "Incremented rate limit request count",
-			log.Int("channel_id", channel.ID),
-			log.String("channel_name", channel.Name),
-			log.Int64("current_rpm", m.tracker.GetRequestCount(channel.ID)),
-		)
-	}
-
-	return request, nil
 }
 
 func (m *rateLimitTracking) OnOutboundLlmResponse(ctx context.Context, response *llm.Response) (*llm.Response, error) {
@@ -125,8 +109,8 @@ func (m *rateLimitTracking) OnOutboundRawError(ctx context.Context, err error) {
 		return
 	}
 
-	// Local queue rejections never reached upstream — they must not trigger cooldown.
-	if isChannelQueueError(err) {
+	// Local admission rejections never reached upstream — they must not trigger cooldown.
+	if isChannelQueueError(err) || isLocalRPMExhaustedError(err) {
 		return
 	}
 
