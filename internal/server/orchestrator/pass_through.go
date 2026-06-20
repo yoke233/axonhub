@@ -101,6 +101,7 @@ func applyPassThroughRequestBody(outbound *PersistentOutboundTransformer, system
 		}
 
 		request.Body = body
+		outbound.state.PassThroughApplied = true
 
 		return request, nil
 	})

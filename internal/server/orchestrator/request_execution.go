@@ -93,6 +93,7 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 		state.Request,
 		*request,
 		m.outbound.APIFormat(),
+		state.PassThroughApplied,
 	)
 	if err != nil {
 		return nil, err

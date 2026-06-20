@@ -593,6 +593,7 @@ func (p *PersistentOutboundTransformer) NextChannel(ctx context.Context) error {
 	p.state.RequestExec = nil
 	p.pendingRetryAction = pendingRetryNone
 	p.clearAuthCooldownOnSuccess = false
+	p.state.PassThroughApplied = false
 
 	candidate := p.state.ChannelModelsCandidates[p.state.CurrentCandidateIndex]
 	p.state.CurrentCandidate = candidate
@@ -682,6 +683,7 @@ func (p *PersistentOutboundTransformer) PrepareForRetry(ctx context.Context) err
 
 	// Reset request execution for the same channel.
 	p.state.RequestExec = nil
+	p.state.PassThroughApplied = false
 
 	if p.pendingRetryAction == pendingRetryUnauthorized {
 		p.pendingRetryAction = pendingRetryNone

@@ -7,6 +7,7 @@ export interface CurlGeneratorOptions {
   headers?: Record<string, any>;
   body?: any;
   baseUrl?: string;
+  requestURL?: string;
   apiFormat?: ApiFormat;
   channelType?: ChannelType;
 }
@@ -49,27 +50,32 @@ function getApiFormatFromChannelType(channelType?: ChannelType): ApiFormat | und
 }
 
 export function generateCurlCommand(options: CurlGeneratorOptions): string {
-  const { headers, body, baseUrl, apiFormat, channelType } = options;
-
-  const resolvedApiFormat = apiFormat || getApiFormatFromChannelType(channelType);
-  const apiPath = getApiPath(resolvedApiFormat, body, channelType);
+  const { headers, body, baseUrl, requestURL, apiFormat, channelType } = options;
 
   let url: string;
-  if (baseUrl) {
-    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
-    // Avoid path duplication: if baseUrl ends with a prefix of apiPath, strip the overlap.
-    // e.g. baseUrl="https://api.openai.com/v1" + apiPath="/v1/chat/completions"
-    //   -> "https://api.openai.com/v1/chat/completions" (not .../v1/v1/chat/completions)
-    let combinedPath = apiPath;
-    for (let i = 1; i <= apiPath.length; i++) {
-      const prefix = apiPath.substring(0, i);
-      if (cleanBaseUrl.endsWith(prefix)) {
-        combinedPath = apiPath.substring(i);
-      }
-    }
-    url = `${cleanBaseUrl}${combinedPath}`;
+  if (requestURL) {
+    // Prefer the actual upstream URL recorded for this execution when available.
+    url = requestURL;
   } else {
-    url = `${typeof window !== 'undefined' ? window.location.origin : ''}${apiPath}`;
+    const resolvedApiFormat = apiFormat || getApiFormatFromChannelType(channelType);
+    const apiPath = getApiPath(resolvedApiFormat, body, channelType);
+
+    if (baseUrl) {
+      const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+      // Avoid path duplication: if baseUrl ends with a prefix of apiPath, strip the overlap.
+      // e.g. baseUrl="https://api.openai.com/v1" + apiPath="/v1/chat/completions"
+      //   -> "https://api.openai.com/v1/chat/completions" (not .../v1/v1/chat/completions)
+      let combinedPath = apiPath;
+      for (let i = 1; i <= apiPath.length; i++) {
+        const prefix = apiPath.substring(0, i);
+        if (cleanBaseUrl.endsWith(prefix)) {
+          combinedPath = apiPath.substring(i);
+        }
+      }
+      url = `${cleanBaseUrl}${combinedPath}`;
+    } else {
+      url = `${typeof window !== 'undefined' ? window.location.origin : ''}${apiPath}`;
+    }
   }
 
   const curlParts = [`curl '${url}'`];
@@ -105,7 +111,8 @@ export function generateExecutionCurl(
   headers: any,
   body: any,
   channel?: { baseURL?: string; type?: ChannelType },
-  apiFormat?: ApiFormat
+  apiFormat?: ApiFormat,
+  requestURL?: string
 ): string {
   return generateCurlCommand({
     headers,
@@ -113,5 +120,6 @@ export function generateExecutionCurl(
     baseUrl: channel?.baseURL,
     channelType: channel?.type,
     apiFormat,
+    requestURL,
   });
 }
