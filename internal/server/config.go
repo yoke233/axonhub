@@ -20,6 +20,10 @@ type Config struct {
 	// LLMRequestTimeout is the maximum duration for processing a request to LLM.
 	LLMRequestTimeout time.Duration `conf:"llm_request_timeout" yaml:"llm_request_timeout" json:"llm_request_timeout"`
 
+	// AppStopTimeout is the maximum duration the app waits during graceful
+	// shutdown. It should be slightly less than Docker's stop_grace_period.
+	AppStopTimeout time.Duration `conf:"app_stop_timeout" yaml:"app_stop_timeout" json:"app_stop_timeout"`
+
 	// MaxRequestBodyBytes is the maximum accepted request body size for LLM API
 	// endpoints. Set to 0 to disable the limit.
 	MaxRequestBodyBytes int64 `conf:"max_request_body_bytes" yaml:"max_request_body_bytes" json:"max_request_body_bytes"`

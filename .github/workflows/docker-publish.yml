@@ -37,7 +37,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Resolve version & write VERSION
+      - name: Resolve version
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             VERSION=${GITHUB_REF#refs/tags/}
@@ -45,7 +45,6 @@ jobs:
             VERSION=$(git rev-parse --short HEAD)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "$VERSION" > internal/build/VERSION
           echo "Building version: $VERSION for ${{ matrix.arch }}"
 
       - name: Set up Docker Buildx
@@ -73,6 +72,8 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}-${{ matrix.arch }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+          build-args: |
+            AXONHUB_BUILD_VERSION=${{ env.VERSION }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

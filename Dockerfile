@@ -16,6 +16,8 @@ COPY --from=frontend-builder /build/dist /dist
 
 FROM golang:alpine AS backend-builder
 
+ARG AXONHUB_BUILD_VERSION=dev
+
 WORKDIR /build
 
 RUN apk add --no-cache git ca-certificates tzdata
@@ -37,7 +39,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOTOOLCHAIN=auto go build \
     -tags=nomsgpack \
-    -ldflags "-s -w -X 'github.com/looplj/axonhub/internal/build.Version=$(cat internal/build/VERSION 2>/dev/null || echo dev)' -X 'github.com/looplj/axonhub/internal/build.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" \
+    -ldflags "-s -w -X 'github.com/looplj/axonhub/internal/build.Version=${AXONHUB_BUILD_VERSION}' -X 'github.com/looplj/axonhub/internal/build.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" \
     -o axonhub \
     ./cmd/axonhub
 

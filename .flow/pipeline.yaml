@@ -1,0 +1,123 @@
+# 云效 Flow 流水线:构建镜像 → 推送 ACR → 主机零停机滚动部署
+#
+# 这是「流水线即代码」YAML。两种使用方式:
+#   A. 在云效控制台「流水线 → 新建 → YAML 模式」,把本文件内容粘贴进去;
+#   B. 控制台用可视化编辑后点「转换为 YAML」对照,确保 ID/参数与你的环境一致。
+#
+# ⚠️ 下方所有 <...> 占位符必须替换成你云效环境里的真实值:
+#   - <codeup-service-connection>  代码源服务连接 ID(云效「连接管理」里 Codeup 的连接)
+#   - <acr-service-connection>     ACR 镜像仓库服务连接 ID
+#   - <your-namespace>             ACR 命名空间
+#   - <machine-group-id>           主机组 ID(部署目标 ECS 所在主机组)
+#   - region / runsOn 集群         按你的地域调整(示例用 cn-hangzhou)
+#
+# 主机(ECS)一次性前置准备见文件末尾注释。
+
+name: axonhub-deploy-prod
+
+# ───────────────────────────── 代码源 ─────────────────────────────
+sources:
+  axonhub:
+    type: codeup
+    name: axonhub
+    endpoint: https://codeup.aliyun.com/5f6ea0829cffa29cfdd39a7f/yjky/axonhub.git
+    branch: prod
+    # push 到 prod 分支自动触发
+    triggerEvents:
+      - push
+    certificate:
+      type: serviceConnection
+      serviceConnection: <codeup-service-connection>
+
+# ───────────────────────────── 全局变量 ─────────────────────────────
+variables:
+  ACR_REGISTRY:
+    # ACR 镜像地址(不含 tag)
+    value: registry.cn-hangzhou.aliyuncs.com/<your-namespace>/axonhub
+  ACR_REGION:
+    value: cn-hangzhou
+  APP_DIR:
+    # 主机上存放 docker-compose.yaml / .env / scripts 的目录
+    value: /home/admin/axonhub
+
+stages:
+  # ───────────────────────────── 构建阶段 ─────────────────────────────
+  build:
+    name: 构建
+    jobs:
+      build_image:
+        name: 构建并推送镜像
+        runsOn: public/cn-hangzhou
+        steps:
+          docker_build:
+            step: ACRDockerBuild
+            name: 镜像构建并推送 ACR
+            with:
+              serviceConnection: <acr-service-connection>
+              region: ${ACR_REGION}
+              artifact: image
+              dockerRegistry: ${ACR_REGISTRY}
+              # 用 latest 标签;docker rollout 部署时会先 pull 再重建,latest 即可生效。
+              # 想要可回滚的不可变标签,可改成提交号(在控制台 YAML 编辑器里
+              # 补全确认内置变量名,如 ${CI_COMMIT_ID}),并同时推 latest。
+              dockerTag: latest
+              dockerfilePath: Dockerfile
+          upload_bundle:
+            step: ArtifactUpload
+            name: 上传部署包(compose + 脚本)
+            with:
+              uploadType: flowPublic
+              artifact: deploy-bundle
+              filePath:
+                - docker-compose.yaml
+                - scripts/rollout.sh
+
+  # ───────────────────────────── 部署阶段 ─────────────────────────────
+  deploy:
+    name: 部署
+    jobs:
+      rollout:
+        name: 主机组零停机滚动部署
+        component: VMDeploy
+        with:
+          artifact: $[stages.build.build_image.upload_bundle.artifacts.deploy-bundle]
+          machineGroup: <machine-group-id>
+          artifactDownloadPath: ${APP_DIR}/deploy-bundle.tgz
+          executeUser: root
+          # 主机批次/暂停策略在主机组里配置;这里不额外暂停。
+          pauseType: noPause
+          run: |
+            set -euo pipefail
+            mkdir -p ${APP_DIR}
+            cd ${APP_DIR}
+
+            # 1) 解出最新的 docker-compose.yaml 与 scripts/rollout.sh(覆盖旧版)
+            tar -xzf ${APP_DIR}/deploy-bundle.tgz -C ${APP_DIR}
+            chmod +x scripts/rollout.sh
+
+            # 2) 注入镜像地址(本次构建的 tag);.env 里的 DB_PASSWORD 等保持不变
+            export AXONHUB_IMAGE=${ACR_REGISTRY}
+            export AXONHUB_TAG=latest
+
+            # 3) 首次部署:若栈还没起过,先 up -d 拉起整套(traefik/postgres/api)
+            if ! docker compose -f docker-compose.yaml ps --status running api | grep -q .; then
+              docker compose -f docker-compose.yaml up -d
+            else
+              # 4) 后续部署:零停机滚动更新 api(pull 新镜像 → 双副本 → 排空旧副本)
+              bash scripts/rollout.sh
+            fi
+
+# ──────────────────────────────────────────────────────────────────────
+# 主机(ECS)一次性前置准备:
+#   1. 安装 docker、docker compose(v2)。
+#   2. 安装 docker rollout 插件:
+#        mkdir -p ~/.docker/cli-plugins
+#        curl -sSL https://raw.githubusercontent.com/wowu/docker-rollout/master/docker-rollout \
+#          -o ~/.docker/cli-plugins/docker-rollout && chmod +x ~/.docker/cli-plugins/docker-rollout
+#   3. 登录 ACR(让主机能 pull 私有镜像),二选一:
+#        - docker login registry.cn-hangzhou.aliyuncs.com   (一次性,凭证持久化)
+#        - 或给 ECS 配 RAM 角色 + ACR 免密插件
+#   4. 在 ${APP_DIR} 放一份 .env(含 DB_PASSWORD 等敏感配置,不进流水线制品)。
+#      可从仓库 .env.example 复制后修改。
+#   5. 该主机加入云效「主机组」<machine-group-id>。
+# ──────────────────────────────────────────────────────────────────────

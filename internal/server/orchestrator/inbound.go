@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"time"
 
 	"github.com/looplj/axonhub/internal/dumper"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/log"
+	"github.com/looplj/axonhub/internal/pkg/xcontext"
 	"github.com/looplj/axonhub/internal/server/biz"
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
@@ -152,6 +154,9 @@ func (ts *InboundPersistentStream) Close() error {
 	// Check if context was canceled (client disconnected before [DONE]).
 	// Skip the error path if we determined the stream actually completed successfully above.
 	if (ctxErr != nil || streamErr != nil) && !ts.state.StreamCompleted {
+		log.Warn(context.WithoutCancel(ctx), "stream closed before terminal event",
+			streamCloseDiagnosticFields(ctx, ctxErr, streamErr, len(ts.responseChunks))...)
+
 		if ts.request != nil {
 			persistCtx := context.WithoutCancel(ctx)
 
@@ -199,6 +204,44 @@ func (ts *InboundPersistentStream) Close() error {
 	}
 
 	return ts.stream.Close()
+}
+
+func streamCloseDiagnosticFields(
+	ctx context.Context,
+	ctxErr error,
+	streamErr error,
+	chunkCount int,
+) []log.Field {
+	diag := xcontext.Inspect(ctx, time.Now())
+	owner := "not_context_cancel"
+	if errors.Is(ctxErr, context.DeadlineExceeded) || errors.Is(streamErr, context.DeadlineExceeded) {
+		owner = "axonhub_request_deadline"
+	} else if errors.Is(ctxErr, context.Canceled) || errors.Is(streamErr, context.Canceled) {
+		owner = "downstream_client_or_proxy_disconnected_or_server_shutdown"
+		if diag.HasDeadline && diag.Remaining <= 0 {
+			owner = "context_canceled_at_or_after_deadline"
+		}
+	}
+
+	fields := []log.Field{
+		log.String("cancel_owner_inference", owner),
+		log.String("request_context_state", diag.State),
+		log.Int("stream_chunk_count", chunkCount),
+	}
+	if ctxErr != nil {
+		fields = append(fields, log.NamedError("request_context_error", ctxErr))
+	}
+	if streamErr != nil {
+		fields = append(fields, log.NamedError("stream_error", streamErr))
+	}
+	if diag.HasDeadline {
+		fields = append(fields,
+			log.Time("request_context_deadline", diag.Deadline),
+			log.Int64("request_context_remaining_ms", diag.Remaining.Milliseconds()),
+		)
+	}
+
+	return fields
 }
 
 func (ts *InboundPersistentStream) persistResponseChunks(ctx context.Context) {

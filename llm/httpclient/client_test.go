@@ -1,6 +1,7 @@
 package httpclient
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -269,6 +270,24 @@ func TestHttpClientImpl_DoStream(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHttpClientImpl_DoStreamContextCanceledBeforeDeadlineExplainsOwner(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	cancel()
+
+	client := NewHttpClient()
+	stream, err := client.DoStream(ctx, &Request{
+		Method: http.MethodPost,
+		URL:    "http://127.0.0.1:1/v1/chat/completions",
+		Body:   []byte(`{"stream":true}`),
+	})
+
+	require.Nil(t, stream)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "request context canceled before upstream stream completed")
+	require.ErrorContains(t, err, "owner_inference=downstream_client_or_proxy_disconnected_or_server_shutdown")
+	require.ErrorContains(t, err, "context_remaining_ms=")
 }
 
 func TestNewHttpClient_WithInsecureSkipVerify_PreservesDefaultTransportSettings(t *testing.T) {

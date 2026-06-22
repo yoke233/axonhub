@@ -59,13 +59,21 @@ func (l *logger) LogEvent(event fxevent.Event) {
 func startServer() {
 	configureMemoryLimit()
 
+	cfg, err := conf.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
 	server.Run(
 		fx.StartTimeout(60*time.Second),
-		fx.StopTimeout(30*time.Second),
+		fx.StopTimeout(cfg.APIServer.AppStopTimeout),
 		fx.WithLogger(func() fxevent.Logger {
 			return &logger{}
 		}),
-		fx.Provide(conf.Load),
+		fx.Provide(func() conf.Config {
+			return cfg
+		}),
 		fx.Provide(metrics.NewProvider),
 		fx.Invoke(func(lc fx.Lifecycle, server *server.Server, provider *sdk.MeterProvider, ent *ent.Client, requestSvc *biz.RequestService) {
 			lc.Append(fx.Hook{

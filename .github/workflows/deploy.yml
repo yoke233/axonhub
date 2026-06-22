@@ -1,0 +1,198 @@
+name: Publish & Deploy (ACR + ECS)
+
+# 构建多架构 Docker 镜像(amd64 + arm64)→ 推送阿里云 ACR → SSH 到 ECS 滚动部署。
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 配置:
+#   ACR_REGISTRY    ACR 登录地址,如 registry.cn-hangzhou.aliyuncs.com
+#   ACR_NAMESPACE   ACR 命名空间
+#   ACR_USERNAME    ACR 用户名(建议 RAM 子账号 + 仓库访问凭证)
+#   ACR_PASSWORD    ACR 密码 / 访问凭证
+#   ECS_HOST        ECS 公网/内网 IP
+#   ECS_USER        SSH 登录用户(如 root / admin)
+#   ECS_SSH_KEY     SSH 私钥(对应公钥已加入 ECS authorized_keys)
+#   ECS_SSH_PORT    SSH 端口(可选,默认 22)
+#
+# ECS 一次性前置准备见本文件末尾注释。
+
+on:
+  push:
+    branches:
+      - prod
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  # 镜像完整名(不含 tag)。
+  IMAGE: ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/axonhub
+  # ECS 上存放 docker-compose.yaml / .env / scripts 的目录。
+  APP_DIR: /home/admin/axonhub
+
+jobs:
+  # ──────────────────── 构建单架构镜像并推送(矩阵并行)────────────────────
+  build_single_arch:
+    name: Build & push (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out (shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(git rev-parse --short HEAD)
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Building version: $VERSION for ${{ matrix.arch }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push single-arch
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}-${{ matrix.arch }}
+            ${{ env.IMAGE }}:latest-${{ matrix.arch }}
+          build-args: |
+            AXONHUB_BUILD_VERSION=${{ env.VERSION }}
+          # 按架构区分缓存 scope,避免两条并行构建互相覆盖缓存。
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          provenance: false
+          sbom: false
+
+  # ──────────────────── 合并多架构 manifest(统一 tag)────────────────────
+  create_manifests:
+    name: Create multi-arch manifests
+    needs: [build_single_arch]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(echo "$GITHUB_SHA" | cut -c1-7)
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Create & push manifest (version)
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE }}:${VERSION} \
+            ${{ env.IMAGE }}:${VERSION}-amd64 \
+            ${{ env.IMAGE }}:${VERSION}-arm64
+
+      - name: Create & push manifest (latest)
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE }}:latest \
+            ${{ env.IMAGE }}:latest-amd64 \
+            ${{ env.IMAGE }}:latest-arm64
+
+  # ───────────────────────────── 部署到 ECS ─────────────────────────────
+  # 目前一台主机。将来加机器:把 deploy 改成 strategy.matrix 并行多台。
+  deploy:
+    name: Deploy to ECS
+    needs: create_manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out (compose & scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Copy deploy bundle to ECS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          key: ${{ secrets.ECS_SSH_KEY }}
+          port: ${{ secrets.ECS_SSH_PORT || 22 }}
+          source: docker-compose.yaml,scripts/rollout.sh
+          target: ${{ env.APP_DIR }}
+          overwrite: true
+
+      - name: Pull & rollout on ECS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          key: ${{ secrets.ECS_SSH_KEY }}
+          port: ${{ secrets.ECS_SSH_PORT || 22 }}
+          envs: APP_DIR,IMAGE,VERSION
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            cd "${APP_DIR}"
+            chmod +x scripts/rollout.sh
+
+            # 注入本次构建的镜像与 tag;ECS 上 .env 里的 DB_PASSWORD 等保持不变。
+            export AXONHUB_IMAGE="${IMAGE}"
+            export AXONHUB_TAG="${VERSION}"
+            # Compose 项目名,隔离同机多项目;up/ps 与 rollout.sh 均继承此值。
+            export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-axonhub}"
+
+            # 首次部署:整套栈没起过 → up -d 拉起 traefik/postgres/api。
+            # 后续部署:零停机滚动更新 api(pull 新镜像 → 双副本 → 排空旧副本)。
+            if ! docker compose -f docker-compose.yaml ps --status running api | grep -q .; then
+              docker compose -f docker-compose.yaml up -d
+            else
+              bash scripts/rollout.sh
+            fi
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          VERSION: ${{ needs.create_manifests.outputs.version }}
+          APP_DIR: ${{ env.APP_DIR }}
+
+# ──────────────────────────────────────────────────────────────────────
+# ECS 一次性前置准备:
+#   1. 安装 docker、docker compose(v2)。
+#   2. 安装 docker rollout 插件:
+#        mkdir -p ~/.docker/cli-plugins
+#        curl -sSL https://raw.githubusercontent.com/wowu/docker-rollout/master/docker-rollout \
+#          -o ~/.docker/cli-plugins/docker-rollout && chmod +x ~/.docker/cli-plugins/docker-rollout
+#   3. 登录 ACR(让主机能 pull 私有镜像):
+#        docker login registry.cn-hangzhou.aliyuncs.com   (一次性,凭证持久化)
+#   4. 在 ${APP_DIR} 放一份 .env(含 DB_PASSWORD 等敏感配置,不进仓库)。
+#      可从仓库 .env.example 复制后修改。
+#   5. 若 docker-compose.yaml 挂载了 ./config.yml,在 ${APP_DIR} 放一份;
+#      不需要时删掉 compose 里那行挂载。详见 docs/deployment.md。
+#   6. 把 GitHub Actions 用的 SSH 公钥加入 ECS 的 ~/.ssh/authorized_keys。
+# ──────────────────────────────────────────────────────────────────────

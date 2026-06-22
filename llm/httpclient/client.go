@@ -307,7 +307,15 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	// Execute request
 	rawResp, err := hc.client.Do(rawReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP stream request failed: %w", err)
+		fields := []any{
+			slog.String("method", rawReq.Method),
+			slog.String("url", rawReq.URL.String()),
+			slog.Any("error", err),
+		}
+		fields = append(fields, streamRequestFailureAttrs(ctx)...)
+		slog.WarnContext(context.WithoutCancel(ctx), "HTTP stream request failed", fields...)
+
+		return nil, fmt.Errorf("HTTP stream request failed: %s: %w", streamRequestFailureDetail(ctx), err)
 	}
 
 	// Check for HTTP errors before creating stream

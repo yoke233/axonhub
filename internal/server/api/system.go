@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -96,6 +97,41 @@ func (h *SystemHandlers) Health(c *gin.Context) {
 		Version:   build.Version,
 		Build:     buildInfo,
 		Uptime:    buildInfo.Uptime,
+	})
+}
+
+// drainFilePath returns the path of the drain marker file. When this file
+// exists, the instance reports itself as not ready (see Readiness) so the
+// load balancer stops routing new traffic to it while in-flight requests are
+// allowed to finish. The file is created by the deployment pre-stop hook
+// during a zero-downtime rollout. Override with AXONHUB_DRAIN_FILE.
+func drainFilePath() string {
+	if p := os.Getenv("AXONHUB_DRAIN_FILE"); p != "" {
+		return p
+	}
+
+	return "/tmp/drain"
+}
+
+// Readiness reports whether the instance is ready to receive new traffic.
+// Unlike Health (a liveness probe that is always 200 while the process is up),
+// Readiness returns 503 once the drain marker file exists. This lets an
+// active load-balancer health check (e.g. Traefik) remove the instance from
+// rotation at the start of a graceful drain, after which the pre-stop hook's
+// sleep window allows in-flight requests to complete before shutdown.
+func (h *SystemHandlers) Readiness(c *gin.Context) {
+	if _, err := os.Stat(drainFilePath()); err == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":    "draining",
+			"timestamp": time.Now(),
+		})
+
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "ready",
+		"timestamp": time.Now(),
 	})
 }
 

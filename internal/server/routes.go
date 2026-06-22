@@ -80,6 +80,9 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		publicGroup.GET("/favicon", handlers.System.GetFavicon)
 		// Health check endpoint - no authentication required
 		publicGroup.GET("/health", handlers.System.Health)
+		// Readiness probe - drain-aware, used by the load balancer to drain
+		// traffic gracefully during zero-downtime rollouts.
+		publicGroup.GET("/readyz", handlers.System.Readiness)
 	}
 
 	unSecureAdminGroup := server.Group("/admin", middleware.WithTimeout(server.Config.RequestTimeout))

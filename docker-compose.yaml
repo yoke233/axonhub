@@ -1,0 +1,62 @@
+name: axonhub
+
+services:
+  traefik:
+    image: traefik:v3.6.2
+    container_name: axonhub-traefik
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.http.address=:8000
+      # Long SSE streams must not be cut by Traefik's response timeout.
+      - --entrypoints.http.transport.respondingTimeouts.readTimeout=0
+      - --entrypoints.http.transport.respondingTimeouts.writeTimeout=0
+      - --entrypoints.http.transport.respondingTimeouts.idleTimeout=0
+      - --log.level=${TRAEFIK_LOG_LEVEL:-INFO}
+    ports:
+      - "${HTTP_PUBLISH_PORT:-8123}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - axonhub-network
+    restart: unless-stopped
+
+  api:
+    image: ${AXONHUB_IMAGE:-registry-vpc.cn-shanghai.aliyuncs.com/xiaoin/axonhub}:${AXONHUB_TAG:-latest}
+    environment:
+      AXONHUB_DB_DIALECT: ${AXONHUB_DB_DIALECT:-mysql}
+      AXONHUB_DB_DSN: ${AXONHUB_DB_DSN:?set AXONHUB_DB_DSN in .env}
+      AXONHUB_DRAIN_FILE: ${AXONHUB_DRAIN_FILE:-/tmp/drain}
+      AXONHUB_SERVER_LLM_REQUEST_TIMEOUT: ${AXONHUB_SERVER_LLM_REQUEST_TIMEOUT:-1800s}
+      AXONHUB_SERVER_APP_STOP_TIMEOUT: ${AXONHUB_SERVER_APP_STOP_TIMEOUT:-30m50s}
+    expose:
+      - "8090"
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "axonhub_axonhub-network"
+      traefik.http.routers.axonhub.rule: "PathPrefix(`/`)"
+      traefik.http.routers.axonhub.entrypoints: "http"
+      traefik.http.routers.axonhub.service: "axonhub"
+      traefik.http.services.axonhub.loadbalancer.server.port: "8090"
+      traefik.http.services.axonhub.loadbalancer.healthcheck.path: "/readyz"
+      traefik.http.services.axonhub.loadbalancer.healthcheck.interval: "3s"
+      traefik.http.services.axonhub.loadbalancer.healthcheck.timeout: "2s"
+      docker-rollout.pre-stop-hook: "touch /tmp/drain && sleep ${API_DRAIN_PROPAGATION_SECONDS:-10}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test ! -f /tmp/drain && wget -q -O /dev/null http://127.0.0.1:8090/readyz",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 2
+      start_period: 15s
+    networks:
+      - axonhub-network
+    restart: unless-stopped
+    stop_grace_period: ${API_STOP_GRACE_PERIOD:-31m}
+
+networks:
+  axonhub-network:
+    driver: bridge

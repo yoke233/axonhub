@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"context"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/log"
+	"github.com/looplj/axonhub/internal/pkg/xcontext"
 	"github.com/looplj/axonhub/internal/tracing"
 )
 
@@ -45,6 +47,17 @@ func AccessLog() gin.HandlerFunc {
 			log.Duration("latency", latency),
 			log.String("client_ip", c.ClientIP()),
 		}
+		fields = append(fields, requestContextDiagnosticFields(ctx, time.Now())...)
+		if timeoutValue, ok := c.Get(timeoutDurationKey); ok {
+			if timeout, ok := timeoutValue.(time.Duration); ok {
+				fields = append(fields, log.Duration("route_timeout", timeout))
+			}
+		}
+		if deadlineValue, ok := c.Get(timeoutDeadlineKey); ok {
+			if deadline, ok := deadlineValue.(time.Time); ok {
+				fields = append(fields, log.Time("route_timeout_deadline", deadline))
+			}
+		}
 
 		// Add GraphQL operation name if available
 		if opName, ok := tracing.GetOperationName(ctx); ok {
@@ -56,6 +69,29 @@ func AccessLog() gin.HandlerFunc {
 			fields = append(fields, log.Strings("errors", errMsgs))
 		}
 
-		log.Error(ctx, "[ACCESS]", fields...)
+		// The route timeout middleware cancels the request context after the
+		// handler returns. Log with WithoutCancel so the generic context hook does
+		// not add a misleading context_error=context canceled to normal errors.
+		log.Error(context.WithoutCancel(ctx), "[ACCESS]", fields...)
 	}
+}
+
+func requestContextDiagnosticFields(ctx context.Context, now time.Time) []log.Field {
+	diag := xcontext.Inspect(ctx, now)
+
+	fields := []log.Field{
+		log.String("request_context_state", diag.State),
+		log.String("request_context_observed_at", "access_log_after_handler"),
+	}
+	if diag.Err != nil {
+		fields = append(fields, log.NamedError("request_context_error", diag.Err))
+	}
+	if diag.HasDeadline {
+		fields = append(fields,
+			log.Time("request_context_deadline", diag.Deadline),
+			log.Int64("request_context_remaining_ms", diag.Remaining.Milliseconds()),
+		)
+	}
+
+	return fields
 }
