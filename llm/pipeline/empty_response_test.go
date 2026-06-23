@@ -13,6 +13,17 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 )
 
+func TestHasResponseContent_ReasoningSignature(t *testing.T) {
+	signature := "gAAAA_reasoning"
+
+	require.True(t, hasResponseContent(&llm.Response{
+		Object: "chat.completion.chunk",
+		Choices: []llm.Choice{{
+			Delta: &llm.Message{ReasoningSignature: &signature},
+		}},
+	}))
+}
+
 func TestHasResponseContent(t *testing.T) {
 	t.Run("empty response", func(t *testing.T) {
 		require.False(t, hasResponseContent(&llm.Response{}))
