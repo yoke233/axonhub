@@ -143,7 +143,7 @@ func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error)
 func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	// Use efficient aggregation query with JOIN to get channel details and filter out deleted channels
 	type channelStats struct {
@@ -166,9 +166,7 @@ func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *s
 			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
 
 			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			// Group by channel fields to get names and types directly
 			s.GroupBy(channelTable.C(channel.FieldName))
@@ -202,7 +200,7 @@ func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *s
 func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *string) ([]*RequestStatsByModel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type modelStats struct {
 		ModelID string `json:"model_id"`
@@ -214,8 +212,11 @@ func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *str
 	query := r.client.UsageLog.Query()
 
 	// Apply time window filter when provided
-	if applyFilter {
-		query = query.Where(usagelog.CreatedAtGTE(since))
+	if timeFilter.hasStart() {
+		query = query.Where(usagelog.CreatedAtGTE(timeFilter.since))
+	}
+	if timeFilter.hasEnd() {
+		query = query.Where(usagelog.CreatedAtLTE(timeFilter.until))
 	}
 
 	err := query.
@@ -251,7 +252,7 @@ func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *str
 func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*RequestStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type apiKeyStats struct {
 		APIKeyID int `json:"api_key_id"`
@@ -265,8 +266,11 @@ func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *st
 		Where(usagelog.APIKeyIDNotNil())
 
 	// Apply time window filter when provided
-	if applyFilter {
-		query = query.Where(usagelog.CreatedAtGTE(since))
+	if timeFilter.hasStart() {
+		query = query.Where(usagelog.CreatedAtGTE(timeFilter.since))
+	}
+	if timeFilter.hasEnd() {
+		query = query.Where(usagelog.CreatedAtLTE(timeFilter.until))
 	}
 
 	err := query.
@@ -330,7 +334,7 @@ func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *st
 func (r *queryResolver) TokenStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*TokenStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type tokenStats struct {
 		APIKeyID        int   `json:"api_key_id"`
@@ -348,9 +352,7 @@ func (r *queryResolver) TokenStatsByAPIKey(ctx context.Context, timeWindow *stri
 	err := r.client.UsageLog.Query().
 		Where(usagelog.APIKeyIDNotNil()).
 		Modify(func(s *sql.Selector) {
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
 
@@ -873,7 +875,7 @@ func (r *queryResolver) ChannelSuccessRates(ctx context.Context, timeWindow *str
 		defaultWindow := "day"
 		timeWindow = &defaultWindow
 	}
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	// Handle limit parameter (0 means no limit)
 	limitCount := 0
@@ -900,9 +902,7 @@ func (r *queryResolver) ChannelSuccessRates(ctx context.Context, timeWindow *str
 				Where(sql.NotNull(requestexecution.FieldChannelID))
 
 			// Apply time filter
-			if applyFilter {
-				s.Where(sql.GTE(s.C(requestexecution.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(requestexecution.FieldCreatedAt))
 
 			s.GroupBy(requestexecution.FieldChannelID)
 		}).
@@ -1448,7 +1448,7 @@ func (r *queryResolver) ChannelPerformanceStats(ctx context.Context) ([]*Channel
 func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *string) ([]*TokenStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type channelTokenStats struct {
 		ChannelID       int    `json:"channel_id"`
@@ -1472,9 +1472,7 @@ func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *str
 			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
 
 			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(channelTable.C(channel.FieldID), channelTable.C(channel.FieldName))
 
@@ -1518,7 +1516,7 @@ func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *str
 func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *string) ([]*TokenStatsByModel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type modelTokenStats struct {
 		ModelID         string `json:"model_id"`
@@ -1533,9 +1531,7 @@ func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *strin
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {
 			// Apply time window filter when provided
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(s.C(usagelog.FieldModelID))
 
@@ -1577,7 +1573,7 @@ func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *strin
 func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *string) ([]*CostStatsByChannel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type channelCostStats struct {
 		ChannelName string  `json:"channel_name"`
@@ -1597,9 +1593,7 @@ func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *stri
 			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
 
 			// Apply time window filtering
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(channelTable.C(channel.FieldName))
 
@@ -1628,7 +1622,7 @@ func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *stri
 func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string) ([]*CostStatsByModel, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type modelCostStats struct {
 		ModelID string  `json:"model_id"`
@@ -1640,9 +1634,7 @@ func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string
 	err := r.client.UsageLog.Query().
 		Modify(func(s *sql.Selector) {
 			// Apply time window filtering
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(s.C(usagelog.FieldModelID))
 
@@ -1671,7 +1663,7 @@ func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string
 func (r *queryResolver) CostStatsByAPIKey(ctx context.Context, timeWindow *string) ([]*CostStatsByAPIKey, error) {
 	ctx = authz.WithScopeDecision(ctx, scopes.ScopeReadDashboard)
 
-	since, applyFilter := r.parseTimeWindow(ctx, timeWindow)
+	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
 	type apiKeyCostStats struct {
 		APIKeyID int     `json:"api_key_id"`
@@ -1684,9 +1676,7 @@ func (r *queryResolver) CostStatsByAPIKey(ctx context.Context, timeWindow *strin
 		Where(usagelog.APIKeyIDNotNil()).
 		Modify(func(s *sql.Selector) {
 			// Apply time window filtering
-			if applyFilter {
-				s.Where(sql.GTE(s.C(usagelog.FieldCreatedAt), since))
-			}
+			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
 
 			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
 

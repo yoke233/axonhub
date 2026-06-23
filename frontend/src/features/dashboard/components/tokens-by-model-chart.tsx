@@ -7,7 +7,6 @@ import { Loader2 } from 'lucide-react';
 import { formatNumber } from '@/utils/format-number';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useTokensByModel } from '../data/dashboard';
-import type { TimePeriod } from '@/components/time-period-selector';
 import { ChartLegend } from './chart-legend';
 
 const TOKEN_COLORS = {
@@ -19,7 +18,7 @@ const TOKEN_COLORS = {
 const COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'];
 
 interface TokensByModelChartProps {
-  timePeriod: TimePeriod;
+  timePeriod: string;
 }
 
 export function TokensByModelChart({ timePeriod }: TokensByModelChartProps) {

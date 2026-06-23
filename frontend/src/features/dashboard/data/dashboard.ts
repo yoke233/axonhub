@@ -161,6 +161,25 @@ export const tokenStatsSchema = z.object({
 
 export type TokenStats = z.infer<typeof tokenStatsSchema>;
 
+export type DashboardExportTable = 'summary' | 'requestCost' | 'tokens' | 'channelSuccessRate';
+export type DashboardExportDimension = 'channel' | 'model' | 'apiKey';
+
+export type DashboardExportRow = {
+  id: string;
+  name: string;
+  type?: string;
+  requests: number;
+  cost: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  successCount?: number;
+  failedCount?: number;
+  successRate?: number;
+};
+
 // GraphQL queries
 const DASHBOARD_STATS_QUERY = `
   query GetDashboardStats {
@@ -456,7 +475,7 @@ export function useTokensByChannel(timeWindow?: string) {
   });
 }
 
-export function useTokensByModel(timeWindow?: string) {
+export function useTokensByModel(timeWindow?: string, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ['tokenStatsByModel', timeWindow],
     queryFn: async () => {
@@ -468,6 +487,7 @@ export function useTokensByModel(timeWindow?: string) {
     },
     refetchInterval: 60000,
     placeholderData: (previousData) => previousData,
+    enabled: options?.enabled ?? true,
   });
 }
 
@@ -573,6 +593,155 @@ export function useChannelSuccessRates(limit?: number, timeWindow?: string) {
     refetchInterval: 300000,
     placeholderData: (previousData) => previousData,
   });
+}
+
+function buildExportRows(
+  requestRows: Array<{ id: string; name: string; count: number }>,
+  costRows: Array<{ id: string; name: string; cost: number }>,
+  tokenRows: Array<{
+    id: string;
+    name: string;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+    reasoningTokens: number;
+    totalTokens: number;
+  }>
+) {
+  const rowMap = new Map<string, DashboardExportRow>();
+
+  const ensureRow = (id: string, name: string) => {
+    const key = id || name;
+    const existing = rowMap.get(key);
+    if (existing) {
+      if (!existing.name && name) existing.name = name;
+      return existing;
+    }
+
+    const row: DashboardExportRow = {
+      id,
+      name,
+      requests: 0,
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0,
+    };
+    rowMap.set(key, row);
+    return row;
+  };
+
+  requestRows.forEach((item) => {
+    ensureRow(item.id, item.name).requests = item.count;
+  });
+  costRows.forEach((item) => {
+    ensureRow(item.id, item.name).cost = item.cost;
+  });
+  tokenRows.forEach((item) => {
+    const row = ensureRow(item.id, item.name);
+    row.inputTokens = item.inputTokens;
+    row.outputTokens = item.outputTokens;
+    row.cachedTokens = item.cachedTokens;
+    row.reasoningTokens = item.reasoningTokens;
+    row.totalTokens = item.totalTokens;
+  });
+
+  return Array.from(rowMap.values()).sort((a, b) => b.requests - a.requests || b.totalTokens - a.totalTokens);
+}
+
+export async function fetchDashboardExportRows(
+  table: DashboardExportTable,
+  dimension: DashboardExportDimension,
+  timeWindow?: string
+) {
+  if (table === 'channelSuccessRate') {
+    const [rates, tokens] = await Promise.all([
+      graphqlRequest<{ channelSuccessRates: ChannelSuccessRate[] }>(CHANNEL_SUCCESS_RATES_QUERY, { timeWindow }),
+      graphqlRequest<{ tokenStatsByChannel: TokensByChannel[] }>(TOKENS_BY_CHANNEL_QUERY, { timeWindow }),
+    ]);
+    const tokenMap = new Map(tokens.tokenStatsByChannel.map((item) => [item.channelName, item]));
+
+    return rates.channelSuccessRates
+      .map((item) => {
+        const token = tokenMap.get(item.channelName);
+        return {
+          id: item.channelId,
+          name: item.channelName,
+          type: item.channelType,
+          requests: item.totalCount,
+          cost: 0,
+          inputTokens: token?.inputTokens ?? 0,
+          outputTokens: token?.outputTokens ?? 0,
+          cachedTokens: token?.cachedTokens ?? 0,
+          reasoningTokens: token?.reasoningTokens ?? 0,
+          totalTokens: token?.totalTokens ?? 0,
+          successCount: item.successCount,
+          failedCount: item.failedCount,
+          successRate: item.successRate,
+        } satisfies DashboardExportRow;
+      })
+      .sort((a, b) => (b.successRate ?? 0) - (a.successRate ?? 0) || b.requests - a.requests);
+  }
+
+  if (dimension === 'channel') {
+    const [requests, costs, tokens] = await Promise.all([
+      table === 'tokens'
+        ? Promise.resolve({ requestStatsByChannel: [] as RequestsByChannel[] })
+        : graphqlRequest<{ requestStatsByChannel: RequestsByChannel[] }>(REQUESTS_BY_CHANNEL_QUERY, { timeWindow }),
+      table === 'tokens'
+        ? Promise.resolve({ costStatsByChannel: [] as CostByChannel[] })
+        : graphqlRequest<{ costStatsByChannel: CostByChannel[] }>(COST_BY_CHANNEL_QUERY, { timeWindow }),
+      table === 'requestCost'
+        ? Promise.resolve({ tokenStatsByChannel: [] as TokensByChannel[] })
+        : graphqlRequest<{ tokenStatsByChannel: TokensByChannel[] }>(TOKENS_BY_CHANNEL_QUERY, { timeWindow }),
+    ]);
+
+    return buildExportRows(
+      requests.requestStatsByChannel.map((item) => ({ id: item.channelName, name: item.channelName, count: item.count })),
+      costs.costStatsByChannel.map((item) => ({ id: item.channelName, name: item.channelName, cost: item.cost })),
+      tokens.tokenStatsByChannel.map((item) => ({ id: item.channelName, name: item.channelName, ...item }))
+    );
+  }
+
+  if (dimension === 'model') {
+    const [requests, costs, tokens] = await Promise.all([
+      table === 'tokens'
+        ? Promise.resolve({ requestStatsByModel: [] as RequestsByModel[] })
+        : graphqlRequest<{ requestStatsByModel: RequestsByModel[] }>(REQUESTS_BY_MODEL_QUERY, { timeWindow }),
+      table === 'tokens'
+        ? Promise.resolve({ costStatsByModel: [] as CostByModel[] })
+        : graphqlRequest<{ costStatsByModel: CostByModel[] }>(COST_BY_MODEL_QUERY, { timeWindow }),
+      table === 'requestCost'
+        ? Promise.resolve({ tokenStatsByModel: [] as TokensByModel[] })
+        : graphqlRequest<{ tokenStatsByModel: TokensByModel[] }>(TOKENS_BY_MODEL_QUERY, { timeWindow }),
+    ]);
+
+    return buildExportRows(
+      requests.requestStatsByModel.map((item) => ({ id: item.modelId, name: item.modelId, count: item.count })),
+      costs.costStatsByModel.map((item) => ({ id: item.modelId, name: item.modelId, cost: item.cost })),
+      tokens.tokenStatsByModel.map((item) => ({ id: item.modelId, name: item.modelId, ...item }))
+    );
+  }
+
+  const [requests, costs, tokens] = await Promise.all([
+    table === 'tokens'
+      ? Promise.resolve({ requestStatsByAPIKey: [] as RequestsByAPIKey[] })
+      : graphqlRequest<{ requestStatsByAPIKey: RequestsByAPIKey[] }>(REQUESTS_BY_API_KEY_QUERY, { timeWindow }),
+    table === 'tokens'
+      ? Promise.resolve({ costStatsByAPIKey: [] as CostByAPIKey[] })
+      : graphqlRequest<{ costStatsByAPIKey: CostByAPIKey[] }>(COST_BY_API_KEY_QUERY, { timeWindow }),
+    table === 'requestCost'
+      ? Promise.resolve({ tokenStatsByAPIKey: [] as TokensByAPIKey[] })
+      : graphqlRequest<{ tokenStatsByAPIKey: TokensByAPIKey[] }>(TOKENS_BY_API_KEY_QUERY, { timeWindow }),
+  ]);
+
+  return buildExportRows(
+    requests.requestStatsByAPIKey.map((item) => ({ id: item.apiKeyId, name: item.apiKeyName, count: item.count })),
+    costs.costStatsByAPIKey.map((item) => ({ id: item.apiKeyId, name: item.apiKeyName, cost: item.cost })),
+    tokens.tokenStatsByAPIKey.map((item) => ({ id: item.apiKeyId, name: item.apiKeyName, ...item }))
+  );
 }
 
 export function useModelPerformanceStats() {

@@ -7,7 +7,6 @@ import { Loader2 } from 'lucide-react';
 import { formatNumber } from '@/utils/format-number';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useTokensByAPIKey } from '../data/dashboard';
-import type { TimePeriod } from '@/components/time-period-selector';
 import { ChartLegend } from './chart-legend';
 
 const COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)', 'var(--chart-4)', 'var(--chart-5)', 'var(--chart-6)'];
@@ -19,7 +18,7 @@ const TOKEN_COLORS = {
 };
 
 interface TokensByAPIKeyChartProps {
-  timePeriod: TimePeriod;
+  timePeriod: string;
 }
 
 export function TokensByAPIKeyChart({ timePeriod }: TokensByAPIKeyChartProps) {

@@ -7,7 +7,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Skeleton } from '@/components/ui/skeleton';
 import { Header } from '@/components/layout/header';
 import { formatNumber } from '@/utils/format-number';
-import { TimePeriodSelector, type TimePeriod } from '@/components/time-period-selector';
+import { TimePeriodSelector } from '@/components/time-period-selector';
 import { ChannelSuccessRate } from './components/channel-success-rate';
 import { DailyRequestStats } from './components/daily-requests-stats';
 import { RequestsByChannelChart } from './components/requests-by-channel-chart';
@@ -24,6 +24,7 @@ import { FastestChannelsCard } from './components/fastest-channels-card';
 import { FastestModelsCard } from './components/fastest-models-card';
 import { ModelPerformanceStats } from './components/model-performance-stats';
 import { ChannelPerformanceStats } from './components/channel-performance-stats';
+import { StatsExportDialog } from './components/stats-export-dialog';
 import { useDashboardStats } from './data/dashboard';
 
 interface CollapsibleSectionProps {
@@ -94,12 +95,12 @@ export default function DashboardPage() {
   const [modelTotalRequests, setModelTotalRequests] = useState(0);
   const [channelTotalRequests, setChannelTotalRequests] = useState(0);
 
-  const [channelTimePeriod, setChannelTimePeriod] = useState<TimePeriod>('allTime');
-  const [channelTokensTimePeriod, setChannelTokensTimePeriod] = useState<TimePeriod>('allTime');
-  const [modelTimePeriod, setModelTimePeriod] = useState<TimePeriod>('allTime');
-  const [modelTokensTimePeriod, setModelTokensTimePeriod] = useState<TimePeriod>('allTime');
-  const [apiKeyTimePeriod, setApiKeyTimePeriod] = useState<TimePeriod>('allTime');
-  const [apiKeyTokensTimePeriod, setApiKeyTokensTimePeriod] = useState<TimePeriod>('allTime');
+  const [channelTimePeriod, setChannelTimePeriod] = useState('allTime');
+  const [channelTokensTimePeriod, setChannelTokensTimePeriod] = useState('allTime');
+  const [modelTimePeriod, setModelTimePeriod] = useState('allTime');
+  const [modelTokensTimePeriod, setModelTokensTimePeriod] = useState('allTime');
+  const [apiKeyTimePeriod, setApiKeyTimePeriod] = useState('allTime');
+  const [apiKeyTokensTimePeriod, setApiKeyTokensTimePeriod] = useState('allTime');
 
   const modelPerformanceDescription = useMemo(() => {
     return t('dashboard.charts.performanceDescription', { count: formatNumber(modelTotalRequests) });
@@ -144,6 +145,10 @@ export default function DashboardPage() {
   return (
     <div className='flex-1 space-y-6 p-8 pt-6'>
       <Header />
+
+      <div className='flex justify-end'>
+        <StatsExportDialog />
+      </div>
 
       {/* 概览部分 - 始终展示 */}
       <section className='space-y-4'>
@@ -192,7 +197,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.requestsCostByChannel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByChannelDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={channelTimePeriod} onChange={setChannelTimePeriod} />
+                <TimePeriodSelector value={channelTimePeriod} onChange={setChannelTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>
@@ -204,7 +209,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.tokensByChannel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByChannelDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={channelTokensTimePeriod} onChange={setChannelTokensTimePeriod} />
+                <TimePeriodSelector value={channelTokensTimePeriod} onChange={setChannelTokensTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>
@@ -226,7 +231,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.requestsCostByModel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByModelDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={modelTimePeriod} onChange={setModelTimePeriod} />
+                <TimePeriodSelector value={modelTimePeriod} onChange={setModelTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>
@@ -238,7 +243,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.tokensByModel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByModelDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={modelTokensTimePeriod} onChange={setModelTokensTimePeriod} />
+                <TimePeriodSelector value={modelTokensTimePeriod} onChange={setModelTokensTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>
@@ -260,7 +265,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.requestsCostByAPIKey')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByAPIKeyDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={apiKeyTimePeriod} onChange={setApiKeyTimePeriod} />
+                <TimePeriodSelector value={apiKeyTimePeriod} onChange={setApiKeyTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>
@@ -272,7 +277,7 @@ export default function DashboardPage() {
               <CardTitle>{t('dashboard.charts.tokensByAPIKey')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByAPIKeyDescription')}</CardDescription>
               <CardAction>
-                <TimePeriodSelector value={apiKeyTokensTimePeriod} onChange={setApiKeyTokensTimePeriod} />
+                <TimePeriodSelector value={apiKeyTokensTimePeriod} onChange={setApiKeyTokensTimePeriod} allowCustom />
               </CardAction>
             </CardHeader>
             <CardContent>

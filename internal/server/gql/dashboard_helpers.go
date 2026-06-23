@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -248,29 +249,83 @@ func (r *queryResolver) getTopModelsForAPIKeys(ctx context.Context, apiKeyIDs []
 	return resultMap
 }
 
-// parseTimeWindow parses a time window string and returns the start time and a flag indicating
-// if a filter should be applied. It returns the since time (zero if no filter) and applyFilter.
-// Supported timeWindow values: "day", "week", "month", "allTime", or empty string.
-// Defaults to "allTime" behavior (no filtering) for unknown or empty values.
-func (r *queryResolver) parseTimeWindow(ctx context.Context, timeWindow *string) (since time.Time, applyFilter bool) {
+type timeWindowFilter struct {
+	since time.Time
+	until time.Time
+	apply bool
+}
+
+func (f timeWindowFilter) hasStart() bool {
+	return f.apply && !f.since.IsZero()
+}
+
+func (f timeWindowFilter) hasEnd() bool {
+	return f.apply && !f.until.IsZero()
+}
+
+func (f timeWindowFilter) applySelector(s *sql.Selector, column string) {
+	if f.hasStart() {
+		s.Where(sql.GTE(column, f.since))
+	}
+	if f.hasEnd() {
+		s.Where(sql.LTE(column, f.until))
+	}
+}
+
+// parseTimeWindow parses a time window string and returns the matching filter.
+// Supported values: "day", "week", "month", "allTime", empty string, or
+// "custom|<start RFC3339>|<end RFC3339>". Custom bounds may omit one side.
+// Unknown values default to allTime behavior (no filtering).
+func (r *queryResolver) parseTimeWindow(ctx context.Context, timeWindow *string) timeWindowFilter {
 	loc := r.systemService.TimeLocation(ctx)
 	period := xtime.GetCalendarPeriods(loc)
 
-	if timeWindow != nil && *timeWindow != "" && *timeWindow != "allTime" {
-		applyFilter = true
-
-		switch *timeWindow {
-		case "day":
-			since = period.Today.Start
-		case "week":
-			since = period.ThisWeek.Start
-		case "month":
-			since = period.ThisMonth.Start
-		default:
-			// Unknown value - default to allTime behavior (no filtering)
-			applyFilter = false
-		}
+	if timeWindow == nil {
+		return timeWindowFilter{}
 	}
 
-	return since, applyFilter
+	raw := strings.TrimSpace(*timeWindow)
+	if raw == "" || raw == "allTime" {
+		return timeWindowFilter{}
+	}
+
+	if strings.HasPrefix(raw, "custom|") {
+		parts := strings.SplitN(raw, "|", 3)
+		if len(parts) != 3 {
+			return timeWindowFilter{}
+		}
+
+		var filter timeWindowFilter
+		if parts[1] != "" {
+			since, err := time.Parse(time.RFC3339Nano, parts[1])
+			if err != nil {
+				return timeWindowFilter{}
+			}
+			filter.since = since
+		}
+		if parts[2] != "" {
+			until, err := time.Parse(time.RFC3339Nano, parts[2])
+			if err != nil {
+				return timeWindowFilter{}
+			}
+			filter.until = until
+		}
+		if !filter.since.IsZero() && !filter.until.IsZero() && filter.until.Before(filter.since) {
+			return timeWindowFilter{}
+		}
+		filter.apply = !filter.since.IsZero() || !filter.until.IsZero()
+
+		return filter
+	}
+
+	switch raw {
+	case "day":
+		return timeWindowFilter{since: period.Today.Start, apply: true}
+	case "week":
+		return timeWindowFilter{since: period.ThisWeek.Start, apply: true}
+	case "month":
+		return timeWindowFilter{since: period.ThisMonth.Start, apply: true}
+	default:
+		return timeWindowFilter{}
+	}
 }
