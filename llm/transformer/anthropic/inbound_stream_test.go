@@ -214,6 +214,81 @@ func collectInboundStreamEvents(t *testing.T, transformer *InboundTransformer, i
 	return events
 }
 
+func TestInboundStream_EmitsMessageStopWhenFinishHasNoUsage(t *testing.T) {
+	transformer := NewInboundTransformer()
+
+	text := "slow mock content"
+	stop := "stop"
+	input := []*llm.Response{
+		{
+			ID:     "chatcmpl_mock_no_usage",
+			Object: "chat.completion.chunk",
+			Model:  "mock-slow",
+			Choices: []llm.Choice{{
+				Index: 0,
+				Delta: &llm.Message{
+					Role: "assistant",
+					Content: llm.MessageContent{
+						Content: &text,
+					},
+				},
+			}},
+		},
+		{
+			ID:     "chatcmpl_mock_no_usage",
+			Object: "chat.completion.chunk",
+			Model:  "mock-slow",
+			Choices: []llm.Choice{{
+				Index:        0,
+				FinishReason: &stop,
+			}},
+		},
+	}
+
+	events := collectInboundStreamEvents(t, transformer, input)
+
+	require.GreaterOrEqual(t, len(events), 5)
+	require.Equal(t, "message_stop", events[len(events)-1].Type)
+	require.Equal(t, "message_delta", events[len(events)-2].Type)
+	require.NotNil(t, events[len(events)-2].Delta)
+	require.NotNil(t, events[len(events)-2].Delta.StopReason)
+	require.Equal(t, "end_turn", *events[len(events)-2].Delta.StopReason)
+	require.Equal(t, "content_block_stop", events[len(events)-3].Type)
+}
+
+func TestInboundStream_EmitsMessageStopOnDoneWithoutUsage(t *testing.T) {
+	transformer := NewInboundTransformer()
+
+	text := "slow mock content"
+	input := []*llm.Response{
+		{
+			ID:     "chatcmpl_mock_done",
+			Object: "chat.completion.chunk",
+			Model:  "mock-slow",
+			Choices: []llm.Choice{{
+				Index: 0,
+				Delta: &llm.Message{
+					Role: "assistant",
+					Content: llm.MessageContent{
+						Content: &text,
+					},
+				},
+			}},
+		},
+		llm.DoneResponse,
+	}
+
+	events := collectInboundStreamEvents(t, transformer, input)
+
+	require.GreaterOrEqual(t, len(events), 5)
+	require.Equal(t, "message_stop", events[len(events)-1].Type)
+	require.Equal(t, "message_delta", events[len(events)-2].Type)
+	require.NotNil(t, events[len(events)-2].Delta)
+	require.NotNil(t, events[len(events)-2].Delta.StopReason)
+	require.Equal(t, "end_turn", *events[len(events)-2].Delta.StopReason)
+	require.Equal(t, "content_block_stop", events[len(events)-3].Type)
+}
+
 func assertCitationsDeltaBeforeContentBlockStop(t *testing.T, events []StreamEvent, expected []TextCitation) {
 	t.Helper()
 

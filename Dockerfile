@@ -43,12 +43,19 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o axonhub \
     ./cmd/axonhub
 
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOTOOLCHAIN=auto go build \
+    -o mock-ai-provider \
+    ./cmd/mock-ai-provider
+
 FROM alpine
 
 RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 COPY --from=backend-builder /build/axonhub /app/axonhub
+COPY --from=backend-builder /build/mock-ai-provider /app/mock-ai-provider
 
-EXPOSE 8090
+EXPOSE 8090 18090
 ENTRYPOINT ["/app/axonhub"]

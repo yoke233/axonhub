@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -332,3 +333,77 @@ func TestPerformanceRecording_StreamFlagBugRegression(t *testing.T) {
 
 // TestRecordPerformanceStream_MarksFirstToken verifies that recordPerformanceStream
 // correctly marks the first token time.
+func TestRecordPerformanceStream_MarksSuccessOnEOFWithoutUsage(t *testing.T) {
+	start := time.Now().Add(-2 * time.Second)
+	state := &PersistenceState{
+		Perf: &biz.PerformanceRecord{
+			ChannelID: 1,
+			StartTime: start,
+			Stream:    true,
+		},
+	}
+	stream := &fakeLLMStream{
+		events: []*llm.Response{
+			{
+				Choices: []llm.Choice{
+					{
+						Delta: &llm.Message{
+							Content: llm.MessageContent{
+								Content: ptrString("a"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	wrapped := &recordPerformanceStream{
+		ctx:    context.Background(),
+		stream: stream,
+		state:  state,
+	}
+
+	require.True(t, wrapped.Next())
+	require.NotNil(t, wrapped.Current())
+	require.False(t, wrapped.Next())
+
+	require.True(t, state.Perf.Success)
+	require.True(t, state.Perf.RequestCompleted)
+	require.False(t, state.Perf.EndTime.IsZero())
+	firstTokenLatencyMs, requestLatencyMs, _ := state.Perf.Calculate()
+	require.Greater(t, firstTokenLatencyMs, int64(0))
+	require.Greater(t, requestLatencyMs, int64(1000))
+}
+
+type fakeLLMStream struct {
+	events []*llm.Response
+	index  int
+	err    error
+}
+
+func (s *fakeLLMStream) Next() bool {
+	if s.index >= len(s.events) {
+		return false
+	}
+	s.index++
+	return true
+}
+
+func (s *fakeLLMStream) Current() *llm.Response {
+	if s.index == 0 || s.index > len(s.events) {
+		return nil
+	}
+	return s.events[s.index-1]
+}
+
+func (s *fakeLLMStream) Err() error {
+	return s.err
+}
+
+func (s *fakeLLMStream) Close() error {
+	return nil
+}
+
+func ptrString(v string) *string {
+	return &v
+}

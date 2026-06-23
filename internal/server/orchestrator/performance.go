@@ -184,7 +184,11 @@ func (s *recordPerformanceStream) Current() *llm.Response {
 }
 
 func (s *recordPerformanceStream) Next() bool {
-	return s.stream.Next()
+	ok := s.stream.Next()
+	if !ok {
+		s.markDone()
+	}
+	return ok
 }
 
 func (s *recordPerformanceStream) Close() error {
@@ -193,6 +197,26 @@ func (s *recordPerformanceStream) Close() error {
 
 func (s *recordPerformanceStream) Err() error {
 	return s.stream.Err()
+}
+
+func (s *recordPerformanceStream) markDone() {
+	if s.state == nil || s.state.Perf == nil || s.state.Perf.RequestCompleted {
+		return
+	}
+
+	if err := s.stream.Err(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			s.state.Perf.MarkCanceled()
+		} else {
+			s.state.Perf.MarkFailed(ExtractErrorCode(err))
+		}
+	} else {
+		s.state.Perf.MarkSuccess()
+	}
+
+	if s.state.ChannelService != nil {
+		s.state.ChannelService.AsyncRecordPerformance(s.ctx, s.state.Perf)
+	}
 }
 
 // ExtractErrorCode extracts HTTP error code from error.

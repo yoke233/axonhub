@@ -249,6 +249,129 @@ func (s *anthropicInboundStream) enqueEvent(ev *StreamEvent) error {
 	return nil
 }
 
+func convertFinishReasonToAnthropicStopReason(finishReason *string) string {
+	if finishReason == nil {
+		return "end_turn"
+	}
+
+	switch *finishReason {
+	case "stop":
+		return "end_turn"
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	default:
+		return "end_turn"
+	}
+}
+
+func (s *anthropicInboundStream) prepareFinish(finishReason *string) error {
+	if s.hasFinished {
+		return nil
+	}
+
+	s.hasFinished = true
+	contentClosed := false
+
+	if err := s.closeThinkingBlock(); err != nil {
+		return fmt.Errorf("failed to close thinking block: %w", err)
+	}
+	if s.lastEventType == "content_block_stop" {
+		contentClosed = true
+	}
+
+	if s.hasTextContentStarted {
+		if err := s.flushPendingTextCitations(); err != nil {
+			return fmt.Errorf("failed to flush text citations: %w", err)
+		}
+
+		s.hasTextContentStarted = false
+
+		streamEvent := StreamEvent{
+			Type:  "content_block_stop",
+			Index: &s.contentIndex,
+		}
+
+		if err := s.enqueEvent(&streamEvent); err != nil {
+			return fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+		}
+
+		s.contentIndex += 1
+		contentClosed = true
+	}
+
+	if s.hasToolContentStarted {
+		s.hasToolContentStarted = false
+
+		streamEvent := StreamEvent{
+			Type:  "content_block_stop",
+			Index: &s.contentIndex,
+		}
+
+		if err := s.enqueEvent(&streamEvent); err != nil {
+			return fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+		}
+
+		s.contentIndex += 1
+		contentClosed = true
+	}
+
+	if !contentClosed && !s.hasTextContentStarted && !s.hasToolContentStarted && !s.hasThinkingContentStarted {
+		streamEvent := StreamEvent{
+			Type:  "content_block_stop",
+			Index: &s.contentIndex,
+		}
+
+		if err := s.enqueEvent(&streamEvent); err != nil {
+			return fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
+		}
+	}
+
+	stopReason := convertFinishReasonToAnthropicStopReason(finishReason)
+	s.stopReason = &stopReason
+
+	return nil
+}
+
+func (s *anthropicInboundStream) emitMessageStop(usage *llm.Usage) error {
+	if s.messageStoped {
+		return nil
+	}
+
+	if s.stopReason == nil {
+		stopReason := "end_turn"
+		s.stopReason = &stopReason
+	}
+
+	streamEvent := StreamEvent{
+		Type: "message_delta",
+		Delta: &StreamDelta{
+			StopReason: s.stopReason,
+		},
+	}
+
+	if usage != nil {
+		streamEvent.Usage = convertToAnthropicUsage(usage)
+	}
+
+	if err := s.enqueEvent(&streamEvent); err != nil {
+		return fmt.Errorf("failed to enqueue message_delta event: %w", err)
+	}
+
+	stopEvent := StreamEvent{
+		Type: "message_stop",
+	}
+
+	if err := s.enqueEvent(&stopEvent); err != nil {
+		return fmt.Errorf("failed to enqueue message_stop event: %w", err)
+	}
+
+	s.messageStoped = true
+
+	return nil
+}
+
 //nolint:maintidx // It is complex, and hard to split.
 func (s *anthropicInboundStream) Next() bool {
 	// If we have events in the queue, return them first
@@ -262,6 +385,24 @@ func (s *anthropicInboundStream) Next() bool {
 
 	// Try to get the next chunk from source
 	if !s.source.Next() {
+		if s.source.Err() != nil {
+			return false
+		}
+
+		if s.hasStarted && !s.messageStoped {
+			if err := s.prepareFinish(nil); err != nil {
+				s.err = err
+				return false
+			}
+
+			if err := s.emitMessageStop(nil); err != nil {
+				s.err = err
+				return false
+			}
+
+			return s.Next()
+		}
+
 		return false
 	}
 
@@ -272,6 +413,18 @@ func (s *anthropicInboundStream) Next() bool {
 
 	// Handle [DONE] marker
 	if chunk.Object == "[DONE]" {
+		if s.hasStarted && !s.messageStoped {
+			if err := s.prepareFinish(nil); err != nil {
+				s.err = err
+				return false
+			}
+
+			if err := s.emitMessageStop(nil); err != nil {
+				s.err = err
+				return false
+			}
+		}
+
 		return s.Next() // Try next chunk
 	}
 
@@ -769,124 +922,18 @@ func (s *anthropicInboundStream) Next() bool {
 
 		// Handle finish reason
 		if choice.FinishReason != nil && !s.hasFinished {
-			s.hasFinished = true
-
-			contentClosed := false
-
-			if err := s.closeThinkingBlock(); err != nil {
-				s.err = fmt.Errorf("failed to close thinking block: %w", err)
+			if err := s.prepareFinish(choice.FinishReason); err != nil {
+				s.err = err
 				return false
 			}
-			if s.lastEventType == "content_block_stop" {
-				contentClosed = true
-			}
-
-			if s.hasTextContentStarted {
-				if err := s.flushPendingTextCitations(); err != nil {
-					s.err = fmt.Errorf("failed to flush text citations: %w", err)
-					return false
-				}
-
-				s.hasTextContentStarted = false
-
-				streamEvent := StreamEvent{
-					Type:  "content_block_stop",
-					Index: &s.contentIndex,
-				}
-
-				err := s.enqueEvent(&streamEvent)
-				if err != nil {
-					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
-					return false
-				}
-
-				s.contentIndex += 1
-				contentClosed = true
-			}
-
-			if s.hasToolContentStarted {
-				s.hasToolContentStarted = false
-
-				streamEvent := StreamEvent{
-					Type:  "content_block_stop",
-					Index: &s.contentIndex,
-				}
-
-				err := s.enqueEvent(&streamEvent)
-				if err != nil {
-					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
-					return false
-				}
-
-				s.contentIndex += 1
-				contentClosed = true
-			}
-
-			if !contentClosed && !s.hasTextContentStarted && !s.hasToolContentStarted && !s.hasThinkingContentStarted {
-				streamEvent := StreamEvent{
-					Type:  "content_block_stop",
-					Index: &s.contentIndex,
-				}
-
-				err := s.enqueEvent(&streamEvent)
-				if err != nil {
-					s.err = fmt.Errorf("failed to enqueue content_block_stop event: %w", err)
-					return false
-				}
-			}
-
-			// Convert finish reason to Anthropic format
-			var stopReason string
-
-			switch *choice.FinishReason {
-			case "stop":
-				stopReason = "end_turn"
-			case "length":
-				stopReason = "max_tokens"
-			case "tool_calls":
-				stopReason = "tool_use"
-			default:
-				stopReason = "end_turn"
-			}
-
-			// Store the stop reason, but don't generate message_delta yet
-			// We'll wait for the usage chunk to combine them
-			s.stopReason = &stopReason
 		}
 	}
 
 	if chunk.Usage != nil && s.hasFinished && !s.messageStoped {
-		// Usage-only chunk after finish_reason - generate message_delta with both stop reason and usage
-		streamEvent := StreamEvent{
-			Type: "message_delta",
-		}
-
-		if s.stopReason != nil {
-			streamEvent.Delta = &StreamDelta{
-				StopReason: s.stopReason,
-			}
-		}
-
-		streamEvent.Usage = convertToAnthropicUsage(chunk.Usage)
-
-		err := s.enqueEvent(&streamEvent)
-		if err != nil {
-			s.err = fmt.Errorf("failed to enqueue message_delta event: %w", err)
+		if err := s.emitMessageStop(chunk.Usage); err != nil {
+			s.err = err
 			return false
 		}
-
-		// Generate message_stop
-		stopEvent := StreamEvent{
-			Type: "message_stop",
-		}
-
-		err = s.enqueEvent(&stopEvent)
-		if err != nil {
-			s.err = fmt.Errorf("failed to enqueue message_stop event: %w", err)
-			return false
-		}
-
-		s.messageStoped = true
 	}
 
 	// Continue to the next event.
