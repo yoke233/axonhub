@@ -171,6 +171,11 @@ type Message struct {
 	ToolCallID *string    `json:"tool_call_id,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 
+	// CacheControl is a provider extension accepted by some OpenAI-compatible
+	// providers. It is parsed inbound and preserved in llm.Message, but the
+	// generic OpenAI outbound transformer does not emit it.
+	CacheControl *llm.CacheControl `json:"cache_control,omitempty"`
+
 	// ReasoningContent for deepseek-reasoner support.
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
 
@@ -263,6 +268,10 @@ type MessageContentPart struct {
 	ImageURL   *ImageURL   `json:"image_url,omitempty"`
 	VideoURL   *VideoURL   `json:"video_url,omitempty"`
 	InputAudio *InputAudio `json:"input_audio,omitempty"`
+	// CacheControl is a provider extension accepted by some OpenAI-compatible
+	// providers. It is parsed inbound and preserved in llm.MessageContentPart,
+	// but generic OpenAI outbound does not emit it.
+	CacheControl *llm.CacheControl `json:"cache_control,omitempty"`
 }
 
 // ImageURL represents an image URL with optional detail level.

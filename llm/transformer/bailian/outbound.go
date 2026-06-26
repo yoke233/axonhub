@@ -72,6 +72,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	applyBailianAnthropicCacheControl(req, llmReq)
+	applyBailianOpenAICacheControl(req, llmReq)
 	applyBailianToolMessageContentCompatibility(req)
 
 	if applyBailianDeepSeekV4Thinking(req, llmReq) {
@@ -156,10 +157,6 @@ func applyBailianCacheControlToMessage(messages []any, msgIndex int, cc *llm.Cac
 		return false
 	}
 
-	if role, _ := msg["role"].(string); role == "tool" {
-		return false
-	}
-
 	switch content := msg["content"].(type) {
 	case string:
 		if content == "" {
@@ -194,10 +191,6 @@ func applyBailianCacheControlToContentPart(messages []any, msgIndex, partIndex i
 		return false
 	}
 
-	if role, _ := msg["role"].(string); role == "tool" {
-		return false
-	}
-
 	switch content := msg["content"].(type) {
 	case string:
 		if partIndex != 0 || llmPart.Type != "text" || llmPart.Text == nil || content == "" {
@@ -226,6 +219,56 @@ func applyBailianCacheControlToContentPart(messages []any, msgIndex, partIndex i
 	}
 
 	return false
+}
+
+func applyBailianOpenAICacheControl(httpReq *httpclient.Request, llmReq *llm.Request) {
+	if httpReq == nil || llmReq == nil || len(httpReq.Body) == 0 || llmReq.APIFormat == llm.APIFormatAnthropicMessage {
+		return
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(httpReq.Body, &body); err != nil {
+		return
+	}
+
+	messages, ok := body["messages"].([]any)
+	if !ok || len(messages) == 0 {
+		return
+	}
+
+	applied := 0
+	for i, msg := range llmReq.Messages {
+		if applied >= maxBailianCacheControlBreakpoints || i >= len(messages) {
+			break
+		}
+
+		if msg.CacheControl != nil && applyBailianCacheControlToMessage(messages, i, msg.CacheControl) {
+			applied++
+		}
+
+		for partIdx, part := range msg.Content.MultipleContent {
+			if applied >= maxBailianCacheControlBreakpoints {
+				break
+			}
+
+			if part.CacheControl != nil && applyBailianCacheControlToContentPart(messages, i, partIdx, part, part.CacheControl) {
+				applied++
+			}
+		}
+	}
+
+	if applied == 0 {
+		return
+	}
+
+	delete(body, "prompt_cache_key")
+
+	updated, err := json.Marshal(body)
+	if err != nil {
+		return
+	}
+
+	httpReq.Body = updated
 }
 
 func applyBailianCacheControlToLastCacheableMessage(messages []any, cc *llm.CacheControl) bool {
@@ -297,6 +340,8 @@ func applyBailianToolMessageContentCompatibility(httpReq *httpclient.Request) {
 		}
 
 		texts := make([]string, 0, len(parts))
+		textParts := make([]any, 0, len(parts))
+		hasCacheControl := false
 		for _, rawPart := range parts {
 			part, ok := rawPart.(map[string]any)
 			if !ok {
@@ -311,10 +356,24 @@ func applyBailianToolMessageContentCompatibility(httpReq *httpclient.Request) {
 			text, _ := part["text"].(string)
 			if text != "" {
 				texts = append(texts, text)
+				textPart := map[string]any{
+					"type": "text",
+					"text": text,
+				}
+				if cc, ok := part["cache_control"]; ok {
+					textPart["cache_control"] = cc
+					hasCacheControl = true
+				}
+
+				textParts = append(textParts, textPart)
 			}
 		}
 
-		msg["content"] = strings.Join(texts, "\n")
+		if hasCacheControl {
+			msg["content"] = textParts
+		} else {
+			msg["content"] = strings.Join(texts, "\n")
+		}
 		changed = true
 	}
 

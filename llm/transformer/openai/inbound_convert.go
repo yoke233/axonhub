@@ -129,6 +129,7 @@ func (m Message) ToLLMMessage() llm.Message {
 		Name:             m.Name,
 		Refusal:          m.Refusal,
 		ToolCallID:       m.ToolCallID,
+		CacheControl:     m.CacheControl,
 		ReasoningContent: m.ReasoningContent,
 		Reasoning:        m.Reasoning,
 	}
@@ -216,8 +217,9 @@ func (c MessageContent) ToLLMContent() llm.MessageContent {
 // ToLLMPart converts OpenAI MessageContentPart to unified llm.MessageContentPart.
 func (p MessageContentPart) ToLLMPart() llm.MessageContentPart {
 	part := llm.MessageContentPart{
-		Type: p.Type,
-		Text: p.Text,
+		Type:         p.Type,
+		Text:         p.Text,
+		CacheControl: p.CacheControl,
 	}
 
 	if p.ImageURL != nil {

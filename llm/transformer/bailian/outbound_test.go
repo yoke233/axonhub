@@ -137,6 +137,159 @@ func TestBailianTransformRequest_ToolMessageImageContentStripped(t *testing.T) {
 	require.NotContains(t, body, "image_url")
 }
 
+func TestBailianTransformRequest_OpenAIToolContentCacheControlPreserved(t *testing.T) {
+	inbound := openai.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "qwen3.7-max",
+			"prompt_cache_key": "should-be-removed-when-explicit-cache-is-used",
+			"messages": [
+				{"role": "user", "content": "read project context"},
+				{
+					"role": "assistant",
+					"content": null,
+					"tool_calls": [
+						{
+							"id": "call_cache_tool",
+							"type": "function",
+							"function": {
+								"name": "read_context",
+								"arguments": "{}"
+							}
+						}
+					]
+				},
+				{
+					"role": "tool",
+					"tool_call_id": "call_cache_tool",
+					"content": [
+						{
+							"type": "text",
+							"text": "stable tool result",
+							"cache_control": {"type": "ephemeral"}
+						}
+					]
+				},
+				{"role": "user", "content": "continue"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.False(t, gjson.Get(body, "prompt_cache_key").Exists())
+	require.Equal(t, "tool", gjson.Get(body, "messages.2.role").String())
+	require.Equal(t, "stable tool result", gjson.Get(body, "messages.2.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.2.content.0.cache_control.type").String())
+}
+
+func TestBailianTransformRequest_AnthropicToolResultCacheControlPreservedOnToolMessage(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 1024,
+			"messages": [
+				{"role": "user", "content": "read project context"},
+				{
+					"role": "assistant",
+					"content": [
+						{
+							"type": "tool_use",
+							"id": "toolu_cache_context",
+							"name": "read_context",
+							"input": {"target": "project"}
+						}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "toolu_cache_context",
+							"content": "stable tool result",
+							"cache_control": {"type": "ephemeral"}
+						}
+					]
+				},
+				{"role": "user", "content": "continue"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+	llmReq.Model = "qwen3.7-max"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.False(t, gjson.Get(body, "prompt_cache_key").Exists())
+	require.Equal(t, "tool", gjson.Get(body, "messages.2.role").String())
+	require.Equal(t, "toolu_cache_context", gjson.Get(body, "messages.2.tool_call_id").String())
+	require.Equal(t, "stable tool result", gjson.Get(body, "messages.2.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.2.content.0.cache_control.type").String())
+}
+
+func TestBailianTransformRequest_ToolMessageCacheControlConvertsStringContentToParts(t *testing.T) {
+	transformer, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	callID := "call_cache_tool"
+	req := &llm.Request{
+		Model:          "qwen3.7-max",
+		PromptCacheKey: lo.ToPtr("should-be-removed-when-explicit-cache-is-used"),
+		Messages: []llm.Message{
+			{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("read project context")}},
+			{
+				Role: "assistant",
+				ToolCalls: []llm.ToolCall{{
+					ID:   callID,
+					Type: "function",
+					Function: llm.FunctionCall{
+						Name:      "read_context",
+						Arguments: "{}",
+					},
+				}},
+			},
+			{
+				Role:         "tool",
+				ToolCallID:   &callID,
+				Content:      llm.MessageContent{Content: lo.ToPtr("stable tool result")},
+				CacheControl: &llm.CacheControl{Type: "ephemeral"},
+			},
+		},
+	}
+
+	httpReq, err := transformer.TransformRequest(context.Background(), req)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.False(t, gjson.Get(body, "prompt_cache_key").Exists())
+	require.Equal(t, "stable tool result", gjson.Get(body, "messages.2.content.0.text").String())
+	require.Equal(t, "ephemeral", gjson.Get(body, "messages.2.content.0.cache_control.type").String())
+}
+
 func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
 	transformer, err := NewOutboundTransformerWithConfig(&Config{
 		BaseURL:        "https://example.com",
