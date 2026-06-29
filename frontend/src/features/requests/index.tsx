@@ -25,6 +25,8 @@ const REQUEST_FILTER_SEARCH_KEYS = {
   channel: 'channel',
   apiKey: 'apiKey',
   modelID: 'modelID',
+  runID: 'runId',
+  conversationID: 'conversationId',
   createdAtFrom: 'createdAtFrom',
   createdAtTo: 'createdAtTo',
   createdAtStartTime: 'createdAtStartTime',
@@ -149,6 +151,8 @@ function parseRequestSearchFilters(search: Record<string, unknown>): RequestSear
     channelFilter: getSearchStringArray(search[REQUEST_FILTER_SEARCH_KEYS.channel]),
     apiKeyFilter: getSearchStringArray(search[REQUEST_FILTER_SEARCH_KEYS.apiKey]),
     modelIDFilter: getSearchString(search[REQUEST_FILTER_SEARCH_KEYS.modelID]),
+    runIDFilter: getSearchString(search[REQUEST_FILTER_SEARCH_KEYS.runID]),
+    conversationIDFilter: getSearchString(search[REQUEST_FILTER_SEARCH_KEYS.conversationID]),
     dateRange: hasDateRange
       ? normalizeDateTimeRangeValue({
           from,
@@ -181,11 +185,13 @@ function RequestsContent() {
     defaultPageSize: 20,
     pageSizeStorageKey: 'requests-table-page-size',
   });
-  const { statusFilter, sourceFilter, channelFilter, apiKeyFilter, modelIDFilter, dateRange } = useMemo(
+  const { statusFilter, sourceFilter, channelFilter, apiKeyFilter, modelIDFilter, runIDFilter, conversationIDFilter, dateRange } = useMemo(
     () => parseRequestSearchFilters(currentSearch),
     [currentSearch]
   );
   const debouncedModelIDFilter = useDebounce(modelIDFilter, 300);
+  const debouncedRunIDFilter = useDebounce(runIDFilter, 300);
+  const debouncedConversationIDFilter = useDebounce(conversationIDFilter, 300);
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   // Build where clause with filters
@@ -211,9 +217,21 @@ function RequestsContent() {
     return Object.keys(where).length > 0 ? where : undefined;
   })();
 
+  const headerWhereClause = (() => {
+    const headerWhere: { [key: string]: any } = {};
+    if (debouncedRunIDFilter) {
+      headerWhere.runID = debouncedRunIDFilter;
+    }
+    if (debouncedConversationIDFilter) {
+      headerWhere.conversationID = debouncedConversationIDFilter;
+    }
+    return Object.keys(headerWhere).length > 0 ? headerWhere : undefined;
+  })();
+
   const { data, isLoading, refetch } = useRequests({
     ...paginationArgs,
     where: whereClause,
+    headerWhere: headerWhereClause,
     orderBy: {
       field: 'CREATED_AT',
       direction: 'DESC',
@@ -272,6 +290,8 @@ function RequestsContent() {
         setSearchStringArray(draft, REQUEST_FILTER_SEARCH_KEYS.channel, filters.channelFilter);
         setSearchStringArray(draft, REQUEST_FILTER_SEARCH_KEYS.apiKey, filters.apiKeyFilter);
         setSearchString(draft, REQUEST_FILTER_SEARCH_KEYS.modelID, filters.modelIDFilter);
+        setSearchString(draft, REQUEST_FILTER_SEARCH_KEYS.runID, filters.runIDFilter);
+        setSearchString(draft, REQUEST_FILTER_SEARCH_KEYS.conversationID, filters.conversationIDFilter);
       });
     },
     [updateRequestSearch]
@@ -346,8 +366,11 @@ function RequestsContent() {
         channelFilter={channelFilter}
         apiKeyFilter={apiKeyFilter}
         modelIDFilter={modelIDFilter}
+        runIDFilter={runIDFilter}
+        conversationIDFilter={conversationIDFilter}
         dateRange={dateRange}
         queryWhere={whereClause}
+        queryHeaderWhere={headerWhereClause}
         onNextPage={handleNextPage}
         onPreviousPage={handlePreviousPage}
         onPageSizeChange={handlePageSizeChange}

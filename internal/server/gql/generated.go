@@ -1261,6 +1261,7 @@ type ComplexityRoot struct {
 		RequestStatsByChannel        func(childComplexity int, timeWindow *string) int
 		RequestStatsByModel          func(childComplexity int, timeWindow *string) int
 		Requests                     func(childComplexity int, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.RequestOrder, where *ent.RequestWhereInput) int
+		RequestsByHeaders            func(childComplexity int, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.RequestOrder, where *ent.RequestWhereInput, headerWhere *RequestHeaderWhereInput) int
 		RetryPolicy                  func(childComplexity int) int
 		Roles                        func(childComplexity int, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.RoleOrder, where *ent.RoleWhereInput) int
 		SecuritySettings             func(childComplexity int) int
@@ -2166,6 +2167,7 @@ type QueryResolver interface {
 	CountChannelsByType(ctx context.Context, input CountChannelsByTypeInput) ([]*ChannelTypeCount, error)
 	QueryChannels(ctx context.Context, input biz.QueryChannelsInput) (*ent.ChannelConnection, error)
 	APIKeyQuotaUsages(ctx context.Context, apiKeyID objects.GUID) ([]*APIKeyProfileQuotaUsage, error)
+	RequestsByHeaders(ctx context.Context, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.RequestOrder, where *ent.RequestWhereInput, headerWhere *RequestHeaderWhereInput) (*ent.RequestConnection, error)
 	DashboardOverview(ctx context.Context) (*DashboardOverview, error)
 	RequestStats(ctx context.Context) (*RequestStats, error)
 	RequestStatsByChannel(ctx context.Context, timeWindow *string) ([]*RequestStatsByChannel, error)
@@ -7717,6 +7719,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.Query.Requests(childComplexity, args["after"].(*entgql.Cursor[int]), args["first"].(*int), args["before"].(*entgql.Cursor[int]), args["last"].(*int), args["orderBy"].(*ent.RequestOrder), args["where"].(*ent.RequestWhereInput)), true
+	case "Query.requestsByHeaders":
+		if e.complexity.Query.RequestsByHeaders == nil {
+			break
+		}
+
+		args, err := ec.field_Query_requestsByHeaders_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.complexity.Query.RequestsByHeaders(childComplexity, args["after"].(*entgql.Cursor[int]), args["first"].(*int), args["before"].(*entgql.Cursor[int]), args["last"].(*int), args["orderBy"].(*ent.RequestOrder), args["where"].(*ent.RequestWhereInput), args["headerWhere"].(*RequestHeaderWhereInput)), true
 	case "Query.retryPolicy":
 		if e.complexity.Query.RetryPolicy == nil {
 			break
@@ -10623,6 +10636,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputRemoveUserFromProjectInput,
 		ec.unmarshalInputRequestExecutionOrder,
 		ec.unmarshalInputRequestExecutionWhereInput,
+		ec.unmarshalInputRequestHeaderWhereInput,
 		ec.unmarshalInputRequestOrder,
 		ec.unmarshalInputRequestWhereInput,
 		ec.unmarshalInputRestoreOptionsInput,
@@ -13353,6 +13367,47 @@ func (ec *executionContext) field_Query_requestStatsByModel_args(ctx context.Con
 		return nil, err
 	}
 	args["timeWindow"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_requestsByHeaders_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "after", ec.unmarshalOCursor2ᚖentgoᚗioᚋcontribᚋentgqlᚐCursor)
+	if err != nil {
+		return nil, err
+	}
+	args["after"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "first", ec.unmarshalOInt2ᚖint)
+	if err != nil {
+		return nil, err
+	}
+	args["first"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "before", ec.unmarshalOCursor2ᚖentgoᚗioᚋcontribᚋentgqlᚐCursor)
+	if err != nil {
+		return nil, err
+	}
+	args["before"] = arg2
+	arg3, err := graphql.ProcessArgField(ctx, rawArgs, "last", ec.unmarshalOInt2ᚖint)
+	if err != nil {
+		return nil, err
+	}
+	args["last"] = arg3
+	arg4, err := graphql.ProcessArgField(ctx, rawArgs, "orderBy", ec.unmarshalORequestOrder2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐRequestOrder)
+	if err != nil {
+		return nil, err
+	}
+	args["orderBy"] = arg4
+	arg5, err := graphql.ProcessArgField(ctx, rawArgs, "where", ec.unmarshalORequestWhereInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐRequestWhereInput)
+	if err != nil {
+		return nil, err
+	}
+	args["where"] = arg5
+	arg6, err := graphql.ProcessArgField(ctx, rawArgs, "headerWhere", ec.unmarshalORequestHeaderWhereInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐRequestHeaderWhereInput)
+	if err != nil {
+		return nil, err
+	}
+	args["headerWhere"] = arg6
 	return args, nil
 }
 
@@ -40354,6 +40409,55 @@ func (ec *executionContext) fieldContext_Query_apiKeyQuotaUsages(ctx context.Con
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Query_apiKeyQuotaUsages_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_requestsByHeaders(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_requestsByHeaders,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.resolvers.Query().RequestsByHeaders(ctx, fc.Args["after"].(*entgql.Cursor[int]), fc.Args["first"].(*int), fc.Args["before"].(*entgql.Cursor[int]), fc.Args["last"].(*int), fc.Args["orderBy"].(*ent.RequestOrder), fc.Args["where"].(*ent.RequestWhereInput), fc.Args["headerWhere"].(*RequestHeaderWhereInput))
+		},
+		nil,
+		ec.marshalNRequestConnection2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋentᚐRequestConnection,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_requestsByHeaders(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "edges":
+				return ec.fieldContext_RequestConnection_edges(ctx, field)
+			case "pageInfo":
+				return ec.fieldContext_RequestConnection_pageInfo(ctx, field)
+			case "totalCount":
+				return ec.fieldContext_RequestConnection_totalCount(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type RequestConnection", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_requestsByHeaders_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -73190,6 +73294,40 @@ func (ec *executionContext) unmarshalInputRequestExecutionWhereInput(ctx context
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputRequestHeaderWhereInput(ctx context.Context, obj any) (RequestHeaderWhereInput, error) {
+	var it RequestHeaderWhereInput
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"runID", "conversationID"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "runID":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("runID"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.RunID = data
+		case "conversationID":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("conversationID"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ConversationID = data
+		}
+	}
+
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputRequestOrder(ctx context.Context, obj any) (ent.RequestOrder, error) {
 	var it ent.RequestOrder
 	asMap := map[string]any{}
@@ -93760,6 +93898,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "requestsByHeaders":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_requestsByHeaders(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "dashboardOverview":
 			field := field
 
@@ -112708,6 +112868,14 @@ func (ec *executionContext) unmarshalORequestExecutionWhereInput2ᚖgithubᚗcom
 		return nil, nil
 	}
 	res, err := ec.unmarshalInputRequestExecutionWhereInput(ctx, v)
+	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalORequestHeaderWhereInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋserverᚋgqlᚐRequestHeaderWhereInput(ctx context.Context, v any) (*RequestHeaderWhereInput, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := ec.unmarshalInputRequestHeaderWhereInput(ctx, v)
 	return &res, graphql.ErrorOnPath(ctx, err)
 }
 

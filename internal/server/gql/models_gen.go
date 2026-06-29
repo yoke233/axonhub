@@ -344,6 +344,11 @@ type RemoveUserFromProjectInput struct {
 	UserID    objects.GUID `json:"userId"`
 }
 
+type RequestHeaderWhereInput struct {
+	RunID          *string `json:"runID,omitempty"`
+	ConversationID *string `json:"conversationID,omitempty"`
+}
+
 type RequestStats struct {
 	RequestsToday     int `json:"requestsToday"`
 	RequestsThisWeek  int `json:"requestsThisWeek"`

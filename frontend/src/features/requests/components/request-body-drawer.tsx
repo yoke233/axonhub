@@ -43,6 +43,7 @@ interface RequestBodyDrawerProps {
   pageInfo?: RequestConnection['pageInfo'];
   /** Optional server-side filter currently applied to the table. */
   queryWhere?: Record<string, any>;
+  queryHeaderWhere?: Record<string, any>;
   projectId?: string | null;
   onViewDetail?: (requestId: string) => void;
 }
@@ -57,6 +58,7 @@ export function RequestBodyDrawer({
   initialRequests,
   pageInfo: initialPageInfo,
   queryWhere,
+  queryHeaderWhere,
   projectId,
   onViewDetail,
 }: RequestBodyDrawerProps) {
@@ -179,6 +181,7 @@ export function RequestBodyDrawer({
         direction: 'older',
         pageSize: initialRequests.length || 20,
         where: queryWhere,
+        headerWhere: queryHeaderWhere,
         permissions,
         projectId: effectiveProjectId,
       });
@@ -195,7 +198,7 @@ export function RequestBodyDrawer({
     } finally {
       setIsLoadingMore(false);
     }
-  }, [currentIndex, allRequests.length, navPageInfo, isLoadingMore, queryWhere, permissions, effectiveProjectId, initialRequests.length]);
+  }, [currentIndex, allRequests.length, navPageInfo, isLoadingMore, queryWhere, queryHeaderWhere, permissions, effectiveProjectId, initialRequests.length]);
 
   const handleNext = useCallback(async () => {
     if (currentIndex > 0) {
@@ -211,6 +214,7 @@ export function RequestBodyDrawer({
         direction: 'newer',
         pageSize: initialRequests.length || 20,
         where: queryWhere,
+        headerWhere: queryHeaderWhere,
         permissions,
         projectId: effectiveProjectId,
       });
@@ -229,7 +233,7 @@ export function RequestBodyDrawer({
     } finally {
       setIsLoadingMore(false);
     }
-  }, [currentIndex, navPageInfo, isLoadingMore, queryWhere, permissions, effectiveProjectId, initialRequests.length]);
+  }, [currentIndex, navPageInfo, isLoadingMore, queryWhere, queryHeaderWhere, permissions, effectiveProjectId, initialRequests.length]);
 
   const handleViewDetail = useCallback(() => {
     if (currentRequestId) {

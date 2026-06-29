@@ -9,7 +9,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 
+	"entgo.io/contrib/entgql"
+	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/apikey"
@@ -786,6 +791,60 @@ func (r *queryResolver) APIKeyQuotaUsages(ctx context.Context, apiKeyID objects.
 	}
 
 	return result, nil
+}
+
+// RequestsByHeaders is the resolver for the requestsByHeaders field.
+func (r *queryResolver) RequestsByHeaders(ctx context.Context, after *entgql.Cursor[int], first *int, before *entgql.Cursor[int], last *int, orderBy *ent.RequestOrder, where *ent.RequestWhereInput, headerWhere *RequestHeaderWhereInput) (*ent.RequestConnection, error) {
+	if err := validatePaginationArgs(first, last); err != nil {
+		return nil, err
+	}
+
+	if orderBy != nil && orderBy.Field.String() == "CREATED_AT" {
+		orderBy.Field = ent.DefaultRequestOrder.Field
+	}
+
+	query := r.client.Request.Query()
+	if where != nil {
+		var err error
+		query, err = where.Filter(query)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if headerWhere != nil {
+		if headerWhere.RunID != nil && strings.TrimSpace(*headerWhere.RunID) != "" {
+			value := strings.TrimSpace(*headerWhere.RunID)
+			query = query.Where(func(s *sql.Selector) {
+				key := http.CanonicalHeaderKey("X-Run-Id")
+				predicates := []*sql.Predicate{
+					sqljson.ValueContains(request.FieldRequestHeaders, value, sqljson.Path(key)),
+				}
+				if lowerKey := strings.ToLower(key); lowerKey != key {
+					predicates = append(predicates, sqljson.ValueContains(request.FieldRequestHeaders, value, sqljson.Path(lowerKey)))
+				}
+				s.Where(sql.Or(predicates...))
+			})
+		}
+
+		if headerWhere.ConversationID != nil && strings.TrimSpace(*headerWhere.ConversationID) != "" {
+			value := strings.TrimSpace(*headerWhere.ConversationID)
+			query = query.Where(func(s *sql.Selector) {
+				key := http.CanonicalHeaderKey("X-Conversation-Id")
+				predicates := []*sql.Predicate{
+					sqljson.ValueContains(request.FieldRequestHeaders, value, sqljson.Path(key)),
+				}
+				if lowerKey := strings.ToLower(key); lowerKey != key {
+					predicates = append(predicates, sqljson.ValueContains(request.FieldRequestHeaders, value, sqljson.Path(lowerKey)))
+				}
+				s.Where(sql.Or(predicates...))
+			})
+		}
+	}
+
+	return query.Paginate(ctx, after, first, before, last,
+		ent.WithRequestOrder(orderBy),
+	)
 }
 
 // ID is the resolver for the id field.

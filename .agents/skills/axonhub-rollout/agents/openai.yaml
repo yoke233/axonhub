@@ -1,0 +1,4 @@
+interface:
+  display_name: "AxonHub Rollout"
+  short_description: "本地构建镜像并安全滚动部署 AxonHub 生产服务"
+  default_prompt: "Use $axonhub-rollout to build, publish, and roll out AxonHub to the 1Panel compose server."

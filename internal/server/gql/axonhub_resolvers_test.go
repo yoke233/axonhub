@@ -12,6 +12,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/enttest"
+	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/objects"
 )
 
@@ -123,4 +124,66 @@ func TestQueryResolver_AllChannelTags_ProjectProfileFiltersVisibleTags(t *testin
 	tags, err := resolver.AllChannelTags(projectCtx)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"shared", "visible"}, lo.Uniq(tags))
+}
+
+func TestQueryResolver_RequestsByHeaders_FiltersStoredRequestHeaders(t *testing.T) {
+	resolver, ctx, client := setupTestQueryResolver(t)
+	defer client.Close()
+
+	projectEntity, err := client.Project.Create().
+		SetName("Header Filter Project").
+		SetDescription("test project").
+		Save(ctx)
+	require.NoError(t, err)
+
+	createRequest := func(headers string) *ent.Request {
+		t.Helper()
+
+		req, err := client.Request.Create().
+			SetProjectID(projectEntity.ID).
+			SetModelID("gpt-test").
+			SetFormat("openai/chat_completions").
+			SetSource(request.SourceAPI).
+			SetStatus(request.StatusCompleted).
+			SetStream(false).
+			SetRequestHeaders(objects.JSONRawMessage(headers)).
+			SetRequestBody(objects.JSONRawMessage(`{}`)).
+			Save(ctx)
+		require.NoError(t, err)
+		return req
+	}
+
+	matching := createRequest(`{"X-Run-Id":["run-1"],"X-Conversation-Id":["conv-1"]}`)
+	createRequest(`{"X-Run-Id":["run-2"],"X-Conversation-Id":["conv-2"]}`)
+	lowercase := createRequest(`{"x-run-id":["run-lower"],"x-conversation-id":["conv-lower"]}`)
+
+	first := 10
+	conn, err := resolver.RequestsByHeaders(ctx, nil, &first, nil, nil, nil, nil, &RequestHeaderWhereInput{
+		RunID: lo.ToPtr("run-1"),
+	})
+	require.NoError(t, err)
+	require.Len(t, conn.Edges, 1)
+	require.Equal(t, matching.ID, conn.Edges[0].Node.ID)
+
+	conn, err = resolver.RequestsByHeaders(ctx, nil, &first, nil, nil, nil, nil, &RequestHeaderWhereInput{
+		RunID: lo.ToPtr("run-lower"),
+	})
+	require.NoError(t, err)
+	require.Len(t, conn.Edges, 1)
+	require.Equal(t, lowercase.ID, conn.Edges[0].Node.ID)
+
+	conn, err = resolver.RequestsByHeaders(ctx, nil, &first, nil, nil, nil, nil, &RequestHeaderWhereInput{
+		RunID:          lo.ToPtr("run-1"),
+		ConversationID: lo.ToPtr("conv-1"),
+	})
+	require.NoError(t, err)
+	require.Len(t, conn.Edges, 1)
+	require.Equal(t, matching.ID, conn.Edges[0].Node.ID)
+
+	conn, err = resolver.RequestsByHeaders(ctx, nil, &first, nil, nil, nil, nil, &RequestHeaderWhereInput{
+		RunID:          lo.ToPtr("run-1"),
+		ConversationID: lo.ToPtr("conv-2"),
+	})
+	require.NoError(t, err)
+	require.Empty(t, conn.Edges)
 }

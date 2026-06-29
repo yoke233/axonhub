@@ -58,6 +58,8 @@
   "requests.actions.blocked": "已封禁",
   "requests.actions.ipAlreadyBlocked": "该 IP 已在封禁列表中",
   "requests.filters.filterModelId": "按模型ID筛选...",
+  "requests.filters.filterRunId": "按 X-Run-Id 筛选...",
+  "requests.filters.filterConversationId": "按 X-Conversation-Id 筛选...",
   "requests.filters.status": "状态",
   "requests.filters.source": "来源",
   "requests.filters.channel": "渠道",

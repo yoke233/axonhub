@@ -899,6 +899,11 @@ input CountChannelsByTypeInput {
   statusIn: [ChannelStatus!]
 }
 
+input RequestHeaderWhereInput {
+  runID: String
+  conversationID: String
+}
+
 extend type Query {
   allChannelSummarys(includeArchived: Boolean): [Channel!]!
   allChannelTags: [String!]!
@@ -913,4 +918,17 @@ extend type Query {
   Returns quota usage for profiles that have quota enabled for an API key.
   """
   apiKeyQuotaUsages(apiKeyId: ID!): [APIKeyProfileQuotaUsage!]!
+
+  """
+  Query requests with optional request header filters.
+  """
+  requestsByHeaders(
+    after: Cursor
+    first: Int
+    before: Cursor
+    last: Int
+    orderBy: RequestOrder
+    where: RequestWhereInput
+    headerWhere: RequestHeaderWhereInput
+  ): RequestConnection!
 }

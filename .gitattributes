@@ -1,0 +1,25 @@
+# Default: treat files as text and normalize line endings to LF both in the
+# repository and in the working tree. This prevents spurious CRLF diffs
+# (notably in generated Go/GraphQL code) when working on Windows.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets — never normalize or attempt text diffs.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.eot   binary
+*.wasm  binary
+*.pen   binary
+*.db    binary

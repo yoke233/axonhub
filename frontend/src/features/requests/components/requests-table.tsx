@@ -44,8 +44,11 @@ interface RequestsTableProps {
   channelFilter: string[];
   apiKeyFilter: string[];
   modelIDFilter: string;
+  runIDFilter: string;
+  conversationIDFilter: string;
   dateRange?: DateTimeRangeValue;
   queryWhere?: Record<string, any>;
+  queryHeaderWhere?: Record<string, any>;
   onNextPage: () => void;
   onPreviousPage: () => void;
   onPageSizeChange: (pageSize: number) => void;
@@ -65,6 +68,8 @@ export interface RequestTableFilters {
   channelFilter: string[];
   apiKeyFilter: string[];
   modelIDFilter: string;
+  runIDFilter: string;
+  conversationIDFilter: string;
 }
 
 function getFilterArrayValue(filters: ColumnFiltersState, id: string) {
@@ -88,8 +93,11 @@ export function RequestsTable({
   channelFilter,
   apiKeyFilter,
   modelIDFilter,
+  runIDFilter,
+  conversationIDFilter,
   dateRange,
   queryWhere,
+  queryHeaderWhere,
   onNextPage,
   onPreviousPage,
   onPageSizeChange,
@@ -167,9 +175,25 @@ export function RequestsTable({
         channelFilter: getFilterArrayValue(newFilters, 'channel'),
         apiKeyFilter: getFilterArrayValue(newFilters, 'apiKey'),
         modelIDFilter: getFilterStringValue(newFilters, 'modelID'),
+        runIDFilter,
+        conversationIDFilter,
       });
     },
-    [columnFilters, onFiltersChange]
+    [columnFilters, onFiltersChange, runIDFilter, conversationIDFilter]
+  );
+
+  const handleHeaderFiltersChange = useCallback(
+    (filters: { runIDFilter: string; conversationIDFilter: string }) => {
+      onFiltersChange({
+        statusFilter,
+        sourceFilter,
+        channelFilter,
+        apiKeyFilter,
+        modelIDFilter,
+        ...filters,
+      });
+    },
+    [onFiltersChange, statusFilter, sourceFilter, channelFilter, apiKeyFilter, modelIDFilter]
   );
 
   const table = useReactTable({
@@ -204,6 +228,9 @@ export function RequestsTable({
         dateRange={dateRange}
         onDateRangeChange={onDateRangeChange}
         onResetFilters={onResetFilters}
+        runIDFilter={runIDFilter}
+        conversationIDFilter={conversationIDFilter}
+        onHeaderFiltersChange={handleHeaderFiltersChange}
         onRefresh={onRefresh}
         showRefresh={showRefresh}
         autoRefresh={autoRefresh}
@@ -294,6 +321,7 @@ export function RequestsTable({
         initialRequests={data}
         pageInfo={pageInfo}
         queryWhere={queryWhere}
+        queryHeaderWhere={queryHeaderWhere}
         onViewDetail={onViewDetail}
       />
     </div>

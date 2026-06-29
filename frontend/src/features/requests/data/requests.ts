@@ -47,8 +47,9 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
       $before: Cursor
       $orderBy: RequestOrder
       $where: RequestWhereInput
+      $headerWhere: RequestHeaderWhereInput
     ) {
-      requests(first: $first, after: $after, last: $last, before: $before, orderBy: $orderBy, where: $where) {
+      requests: requestsByHeaders(first: $first, after: $after, last: $last, before: $before, orderBy: $orderBy, where: $where, headerWhere: $headerWhere) {
         edges {
           node {
             id
@@ -283,6 +284,10 @@ export function useRequests(variables?: {
     projectID?: string;
     [key: string]: any;
   };
+  headerWhere?: {
+    runID?: string;
+    conversationID?: string;
+  };
 }, options?: { projectId?: string | null; scopeToSelectedProject?: boolean; enabled?: boolean }) {
   const { handleError } = useErrorHandler();
   const { t } = useTranslation();
@@ -404,6 +409,7 @@ export async function fetchAdjacentRequestPage(params: {
   direction: 'older' | 'newer';
   pageSize: number;
   where?: Record<string, any>;
+  headerWhere?: Record<string, any>;
   permissions: { canViewApiKeys: boolean; canViewChannels: boolean };
   projectId?: string | null;
 }): Promise<{ requests: Request[]; pageInfo: RequestConnection['pageInfo'] }> {
@@ -419,7 +425,12 @@ export async function fetchAdjacentRequestPage(params: {
   const headers = params.projectId ? { 'X-Project-ID': params.projectId } : undefined;
   const data = await graphqlRequest<{ requests: RequestConnection }>(
     query,
-    { ...variables, where: Object.keys(where).length > 0 ? where : undefined, orderBy: { field: 'CREATED_AT', direction: 'DESC' } },
+    {
+      ...variables,
+      where: Object.keys(where).length > 0 ? where : undefined,
+      headerWhere: params.headerWhere && Object.keys(params.headerWhere).length > 0 ? params.headerWhere : undefined,
+      orderBy: { field: 'CREATED_AT', direction: 'DESC' },
+    },
     headers
   );
   const result = requestConnectionSchema.parse(data?.requests);

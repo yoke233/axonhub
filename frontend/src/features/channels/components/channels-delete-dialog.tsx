@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { IconAlertTriangle } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { CopyButton } from '@/components/ui/copy-button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -54,8 +55,10 @@ export function ChannelsDeleteDialog({ open, onOpenChange, currentRow }: Props) 
             <AlertDescription>{t('channels.dialogs.delete.warningTitle')}</AlertDescription>
           </Alert>
           <div className='space-y-2'>
-            <Label htmlFor='channel-name'>
-              {t('channels.dialogs.delete.confirmLabel')} <strong>{currentRow.name}</strong> {t('channels.dialogs.delete.confirmLabelStrong')}
+            <Label htmlFor='channel-name' className='flex-wrap'>
+              {t('channels.dialogs.delete.confirmLabel')} <strong className='select-text'>{currentRow.name}</strong>{' '}
+              {t('channels.dialogs.delete.confirmLabelStrong')}
+              <CopyButton content={currentRow.name} />
             </Label>
             <Input id='channel-name' placeholder={currentRow.name} value={value} onChange={(e) => setValue(e.target.value)} />
           </div>

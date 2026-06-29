@@ -58,6 +58,8 @@
   "requests.actions.blocked": "Blocked",
   "requests.actions.ipAlreadyBlocked": "This IP is already blocked",
   "requests.filters.filterModelId": "Filter by Model ID...",
+  "requests.filters.filterRunId": "Filter by X-Run-Id...",
+  "requests.filters.filterConversationId": "Filter by X-Conversation-Id...",
   "requests.filters.status": "Status",
   "requests.filters.source": "Source",
   "requests.filters.channel": "Channel",

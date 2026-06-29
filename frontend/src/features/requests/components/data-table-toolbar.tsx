@@ -23,6 +23,9 @@ interface DataTableToolbarProps<TData> {
   dateRange?: DateTimeRangeValue;
   onDateRangeChange?: (range: DateTimeRangeValue | undefined) => void;
   onResetFilters?: () => void;
+  runIDFilter?: string;
+  conversationIDFilter?: string;
+  onHeaderFiltersChange?: (filters: { runIDFilter: string; conversationIDFilter: string }) => void;
   onRefresh?: () => void;
   showRefresh?: boolean;
   autoRefresh?: boolean;
@@ -34,6 +37,9 @@ export function DataTableToolbar<TData>({
   dateRange,
   onDateRangeChange,
   onResetFilters,
+  runIDFilter = '',
+  conversationIDFilter = '',
+  onHeaderFiltersChange,
   onRefresh,
   showRefresh = false,
   autoRefresh = false,
@@ -43,7 +49,7 @@ export function DataTableToolbar<TData>({
   const [showArchivedApiKeys, setShowArchivedApiKeys] = useState(false);
   const [showArchivedChannels, setShowArchivedChannels] = useState(false);
   const hasDateRange = !!dateRange?.from || !!dateRange?.to;
-  const isFiltered = table.getState().columnFilters.length > 0 || hasDateRange;
+  const isFiltered = table.getState().columnFilters.length > 0 || hasDateRange || !!runIDFilter || !!conversationIDFilter;
 
   // Handler to toggle show archived API keys and prune hidden IDs from filters
   const handleToggleShowArchivedApiKeys = (checked: boolean) => {
@@ -166,13 +172,25 @@ export function DataTableToolbar<TData>({
   ];
 
   return (
-    <div className='flex items-center justify-between'>
-      <div className='flex flex-1 items-center space-x-2'>
+    <div className='flex items-center justify-between gap-2'>
+      <div className='flex flex-1 flex-wrap items-center gap-2'>
         <Input
           placeholder={t('requests.filters.filterModelId')}
           value={(table.getColumn('modelID')?.getFilterValue() as string) ?? ''}
           onChange={(event) => table.getColumn('modelID')?.setFilterValue(event.target.value)}
           className='h-8 w-[150px] lg:w-[250px]'
+        />
+        <Input
+          placeholder={t('requests.filters.filterRunId')}
+          value={runIDFilter}
+          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter: event.target.value, conversationIDFilter })}
+          className='h-8 w-[150px] lg:w-[220px]'
+        />
+        <Input
+          placeholder={t('requests.filters.filterConversationId')}
+          value={conversationIDFilter}
+          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter, conversationIDFilter: event.target.value })}
+          className='h-8 w-[180px] lg:w-[260px]'
         />
         {table.getColumn('status') && (
           <DataTableFacetedFilter column={table.getColumn('status')} title={t('requests.filters.status')} options={requestStatuses} />
