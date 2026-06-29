@@ -19,6 +19,13 @@ import { RequestStatus } from '../data/schema';
 import { DataTableViewOptions } from './data-table-view-options';
 import { RequestsExportButton } from './requests-export-button';
 
+// Users often paste values copied from logs/JSON wrapped in quotes
+// (e.g. "019f0dcd-..."). Strip surrounding quotes/whitespace so the filter
+// searches the bare value.
+function stripQuotes(value: string) {
+  return value.trim().replace(/^["']+/, '').replace(/["']+$/, '');
+}
+
 interface DataTableToolbarProps<TData> {
   table: Table<TData>;
   dateRange?: DateTimeRangeValue;
@@ -182,19 +189,19 @@ export function DataTableToolbar<TData>({
         <Input
           placeholder={t('requests.filters.filterModelId')}
           value={(table.getColumn('modelID')?.getFilterValue() as string) ?? ''}
-          onChange={(event) => table.getColumn('modelID')?.setFilterValue(event.target.value)}
+          onChange={(event) => table.getColumn('modelID')?.setFilterValue(stripQuotes(event.target.value))}
           className='h-8 w-[150px] lg:w-[250px]'
         />
         <Input
           placeholder={t('requests.filters.filterRunId')}
           value={runIDFilter}
-          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter: event.target.value, conversationIDFilter })}
+          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter: stripQuotes(event.target.value), conversationIDFilter })}
           className='h-8 w-[150px] lg:w-[220px]'
         />
         <Input
           placeholder={t('requests.filters.filterConversationId')}
           value={conversationIDFilter}
-          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter, conversationIDFilter: event.target.value })}
+          onChange={(event) => onHeaderFiltersChange?.({ runIDFilter, conversationIDFilter: stripQuotes(event.target.value) })}
           className='h-8 w-[180px] lg:w-[260px]'
         />
         {table.getColumn('status') && (
