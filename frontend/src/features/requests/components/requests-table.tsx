@@ -231,6 +231,8 @@ export function RequestsTable({
         runIDFilter={runIDFilter}
         conversationIDFilter={conversationIDFilter}
         onHeaderFiltersChange={handleHeaderFiltersChange}
+        queryWhere={queryWhere}
+        queryHeaderWhere={queryHeaderWhere}
         onRefresh={onRefresh}
         showRefresh={showRefresh}
         autoRefresh={autoRefresh}

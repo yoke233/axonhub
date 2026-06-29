@@ -17,6 +17,7 @@ import { useMe } from '@/features/auth/data/auth';
 import { useAllChannelSummarys } from '@/features/channels/data/channels';
 import { RequestStatus } from '../data/schema';
 import { DataTableViewOptions } from './data-table-view-options';
+import { RequestsExportButton } from './requests-export-button';
 
 interface DataTableToolbarProps<TData> {
   table: Table<TData>;
@@ -26,6 +27,8 @@ interface DataTableToolbarProps<TData> {
   runIDFilter?: string;
   conversationIDFilter?: string;
   onHeaderFiltersChange?: (filters: { runIDFilter: string; conversationIDFilter: string }) => void;
+  queryWhere?: Record<string, any>;
+  queryHeaderWhere?: Record<string, any>;
   onRefresh?: () => void;
   showRefresh?: boolean;
   autoRefresh?: boolean;
@@ -40,6 +43,8 @@ export function DataTableToolbar<TData>({
   runIDFilter = '',
   conversationIDFilter = '',
   onHeaderFiltersChange,
+  queryWhere,
+  queryHeaderWhere,
   onRefresh,
   showRefresh = false,
   autoRefresh = false,
@@ -276,6 +281,7 @@ export function DataTableToolbar<TData>({
             {t('common.refresh')}
           </Button>
         )}
+        <RequestsExportButton where={queryWhere} headerWhere={queryHeaderWhere} />
         <DataTableViewOptions table={table} />
       </div>
     </div>

@@ -110,6 +110,100 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
   `;
 }
 
+// Lightweight node shape returned by the export query.
+export interface ExportRequestNode {
+  id: string;
+  createdAt: string;
+  source: string;
+  modelID: string;
+  format?: string | null;
+  reasoningEffort?: string | null;
+  stream?: boolean | null;
+  status: string;
+  clientIP?: string | null;
+  metricsLatencyMs?: number | null;
+  metricsFirstTokenLatencyMs?: number | null;
+  apiKey?: { id: string; name: string } | null;
+  channel?: { id: string; name: string } | null;
+  usageLogs?: {
+    edges?: Array<{
+      node?: {
+        promptTokens?: number | null;
+        completionTokens?: number | null;
+        totalTokens?: number | null;
+        promptCachedTokens?: number | null;
+        promptWriteCachedTokens?: number | null;
+        totalCost?: number | null;
+      } | null;
+    }> | null;
+  } | null;
+}
+
+// Lean query used for CSV export. Omits executions/headers/bodies to keep the
+// payload small while paginating through potentially many records. Uses
+// requestsByHeaders so the run-id / conversation-id header filters apply too.
+function buildRequestsExportQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean }) {
+  const apiKeyFields = permissions.canViewApiKeys
+    ? `
+            apiKey {
+              id
+              name
+            }`
+    : '';
+
+  const channelFields = permissions.canViewChannels
+    ? `
+            channel {
+              id
+              name
+            }`
+    : '';
+
+  return `
+    query ExportRequests(
+      $first: Int
+      $after: Cursor
+      $orderBy: RequestOrder
+      $where: RequestWhereInput
+      $headerWhere: RequestHeaderWhereInput
+    ) {
+      requests: requestsByHeaders(first: $first, after: $after, orderBy: $orderBy, where: $where, headerWhere: $headerWhere) {
+        edges {
+          node {
+            id
+            createdAt
+            source
+            modelID
+            format
+            reasoningEffort
+            stream
+            status
+            clientIP
+            metricsLatencyMs
+            metricsFirstTokenLatencyMs${apiKeyFields}${channelFields}
+            usageLogs(first: 1) {
+              edges {
+                node {
+                  promptTokens
+                  completionTokens
+                  totalTokens
+                  promptCachedTokens
+                  promptWriteCachedTokens
+                  totalCost
+                }
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+}
+
 function buildRequestDetailQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean }) {
   const apiKeyFields = permissions.canViewApiKeys
     ? `
@@ -438,6 +532,62 @@ export async function fetchAdjacentRequestPage(params: {
   );
   const result = requestConnectionSchema.parse(data?.requests);
   return { requests: result.edges.map((e) => e.node), pageInfo: result.pageInfo };
+}
+
+interface ExportRequestsConnection {
+  edges?: Array<{ node: ExportRequestNode }> | null;
+  pageInfo?: { hasNextPage?: boolean | null; endCursor?: string | null } | null;
+}
+
+const EXPORT_PAGE_SIZE = 100;
+const EXPORT_MAX_ROWS = 10000;
+
+/**
+ * Imperatively page through all requests matching the given filters and collect
+ * them for CSV export. Honors both the column filters (`where`) and the run-id /
+ * conversation-id header filters (`headerWhere`). Stops once EXPORT_MAX_ROWS is
+ * reached and reports `truncated` so the caller can warn that the export was capped.
+ */
+export async function fetchAllRequestsForExport(params: {
+  where?: Record<string, any>;
+  headerWhere?: Record<string, any>;
+  permissions: { canViewApiKeys: boolean; canViewChannels: boolean };
+  projectId?: string | null;
+}): Promise<{ rows: ExportRequestNode[]; truncated: boolean }> {
+  const query = buildRequestsExportQuery(params.permissions);
+
+  const where: Record<string, any> = { ...params.where };
+  if (params.projectId) where.projectID = params.projectId;
+  const whereArg = Object.keys(where).length > 0 ? where : undefined;
+  const headerWhereArg =
+    params.headerWhere && Object.keys(params.headerWhere).length > 0 ? params.headerWhere : undefined;
+  const headers = params.projectId ? { 'X-Project-ID': params.projectId } : undefined;
+
+  const rows: ExportRequestNode[] = [];
+  let after: string | undefined = undefined;
+  let hasNextPage = true;
+
+  while (hasNextPage && rows.length < EXPORT_MAX_ROWS) {
+    const first = Math.min(EXPORT_PAGE_SIZE, EXPORT_MAX_ROWS - rows.length);
+    const data = await graphqlRequest<{ requests: ExportRequestsConnection }>(
+      query,
+      { first, after, where: whereArg, headerWhere: headerWhereArg, orderBy: { field: 'CREATED_AT', direction: 'DESC' } },
+      headers
+    );
+
+    const connection = data?.requests;
+    if (!connection) break;
+
+    for (const edge of connection.edges ?? []) {
+      if (edge?.node) rows.push(edge.node);
+    }
+
+    hasNextPage = Boolean(connection.pageInfo?.hasNextPage && connection.pageInfo?.endCursor);
+    after = connection.pageInfo?.endCursor ?? undefined;
+  }
+
+  const truncated = hasNextPage && rows.length >= EXPORT_MAX_ROWS;
+  return { rows, truncated };
 }
 
 export function useRequestExecutions(
