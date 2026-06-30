@@ -211,6 +211,31 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
     return diffMs;
   };
 
+  const isTerminalExecutionStatus = (status: string) => status === 'completed' || status === 'failed' || status === 'canceled';
+
+  const getExecutionLatency = (execution: any) => {
+    if (!isTerminalExecutionStatus(execution.status)) return null;
+    if (execution.metricsLatencyMs != null) return execution.metricsLatencyMs;
+    return calculateLatency(execution.createdAt, execution.updatedAt);
+  };
+
+  const getExecutionEndTime = (execution: any) => {
+    if (!isTerminalExecutionStatus(execution.status) || !execution.updatedAt) return null;
+    return new Date(execution.updatedAt);
+  };
+
+  const getExecutionStartTime = (execution: any) => {
+    if (!execution.createdAt) return null;
+
+    const endTime = getExecutionEndTime(execution);
+    const latencyMs = getExecutionLatency(execution);
+    if (endTime && latencyMs != null) {
+      return new Date(endTime.getTime() - latencyMs);
+    }
+
+    return new Date(execution.createdAt);
+  };
+
   const formatLatency = (latencyMs: number | null) => {
     if (latencyMs === null) return t('requests.columns.unknown');
     if (latencyMs < 1000) return `${latencyMs}ms`;
@@ -601,6 +626,9 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                 <div className='space-y-6'>
                   {executions.edges.map((edge: any, index: number) => {
                     const execution = edge.node;
+                    const executionStartTime = getExecutionStartTime(execution);
+                    const executionEndTime = getExecutionEndTime(execution);
+                    const executionLatency = getExecutionLatency(execution);
                     return (
                       <Card key={execution.id} className='bg-muted/20 border-0 shadow-sm'>
                         <CardHeader className='pb-4'>
@@ -638,7 +666,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {t('requests.dialogs.requestDetail.fields.startTime')}
                               </span>
                               <p className='text-muted-foreground font-mono text-sm'>
-                                {execution.createdAt ? format(new Date(execution.createdAt), 'yyyy-MM-dd HH:mm:ss', { locale }) : t('requests.columns.unknown')}
+                                {executionStartTime ? format(executionStartTime, 'yyyy-MM-dd HH:mm:ss', { locale }) : t('requests.columns.unknown')}
                               </p>
                             </div>
                             <div className='bg-background space-y-2 rounded-lg border p-3'>
@@ -647,11 +675,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {t('requests.dialogs.requestDetail.fields.endTime')}
                               </span>
                               <p className='text-muted-foreground font-mono text-sm'>
-                                {execution.status === 'completed' || execution.status === 'failed'
-                                  ? execution.updatedAt
-                                    ? format(new Date(execution.updatedAt), 'yyyy-MM-dd HH:mm:ss', { locale })
-                                    : t('requests.columns.unknown')
-                                  : '-'}
+                                {executionEndTime ? format(executionEndTime, 'yyyy-MM-dd HH:mm:ss', { locale }) : '-'}
                               </p>
                             </div>
                             <div className='bg-background space-y-2 rounded-lg border p-3'>
@@ -660,7 +684,7 @@ export function RequestDetailContent({ requestId, projectId, previewRequest, isP
                                 {t('requests.columns.latency')}
                               </span>
                               <p className='text-muted-foreground font-mono text-sm'>
-                                {execution.status === 'completed' || execution.status === 'failed' ? formatLatency(calculateLatency(execution.createdAt, execution.updatedAt)) : '-'}
+                                {executionLatency != null ? formatLatency(executionLatency) : '-'}
                               </p>
                             </div>
                             <div className='bg-background space-y-2 rounded-lg border p-3'>
