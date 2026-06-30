@@ -290,7 +290,7 @@ func TestBailianTransformRequest_ToolMessageCacheControlConvertsStringContentToP
 	require.Equal(t, "ephemeral", gjson.Get(body, "messages.2.content.0.cache_control.type").String())
 }
 
-func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
+func TestBailianTransformRequest_DoesNotInferDeepSeekV4Thinking(t *testing.T) {
 	transformer, err := NewOutboundTransformerWithConfig(&Config{
 		BaseURL:        "https://example.com",
 		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
@@ -298,38 +298,24 @@ func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name                 string
-		reasoningEffort      string
-		withTools            bool
-		wantEnableThinking   bool
-		wantReasoningEffort  string
-		wantReasoningPresent bool
+		name            string
+		reasoningEffort string
+		withTools       bool
 	}{
 		{
-			name:                 "plain request defaults to high",
-			wantEnableThinking:   true,
-			wantReasoningEffort:  "high",
-			wantReasoningPresent: true,
+			name: "plain request does not add thinking",
 		},
 		{
-			name:                 "agentic request defaults to max",
-			withTools:            true,
-			wantEnableThinking:   true,
-			wantReasoningEffort:  "max",
-			wantReasoningPresent: true,
+			name:      "agentic request does not add thinking",
+			withTools: true,
 		},
 		{
-			name:                 "medium maps to high",
-			reasoningEffort:      "medium",
-			wantEnableThinking:   true,
-			wantReasoningEffort:  "high",
-			wantReasoningPresent: true,
+			name:            "reasoning_effort passes through unchanged",
+			reasoningEffort: "medium",
 		},
 		{
-			name:                 "none disables thinking",
-			reasoningEffort:      "none",
-			wantEnableThinking:   false,
-			wantReasoningPresent: false,
+			name:            "none passes through unchanged",
+			reasoningEffort: "none",
 		},
 	}
 
@@ -355,9 +341,9 @@ func TestBailianTransformRequest_DeepSeekV4Thinking(t *testing.T) {
 
 			body := string(httpReq.Body)
 			require.False(t, gjson.Get(body, "thinking").Exists())
-			require.Equal(t, tt.wantEnableThinking, gjson.Get(body, "enable_thinking").Bool())
-			if tt.wantReasoningPresent {
-				require.Equal(t, tt.wantReasoningEffort, gjson.Get(body, "reasoning_effort").String())
+			require.False(t, gjson.Get(body, "enable_thinking").Exists())
+			if tt.reasoningEffort != "" {
+				require.Equal(t, tt.reasoningEffort, gjson.Get(body, "reasoning_effort").String())
 			} else {
 				require.False(t, gjson.Get(body, "reasoning_effort").Exists())
 			}
@@ -425,10 +411,13 @@ func TestBailianTransformRequest_AnthropicThinkingMetadata(t *testing.T) {
 
 			body := string(httpReq.Body)
 			enableThinking := gjson.Get(body, "enable_thinking")
+			require.False(t, gjson.Get(body, "thinking").Exists())
 			require.Equal(t, tt.wantExists, enableThinking.Exists())
 			if tt.wantExists {
 				require.Equal(t, tt.wantEnableThinking, enableThinking.Bool())
 				require.False(t, gjson.Get(body, "reasoning_effort").Exists())
+			} else {
+				require.Equal(t, tt.reasoningEffort, gjson.Get(body, "reasoning_effort").String())
 			}
 		})
 	}
@@ -465,7 +454,82 @@ func TestBailianTransformRequest_AnthropicInboundThinkingToDashScope(t *testing.
 
 	body := string(httpReq.Body)
 	require.True(t, gjson.Get(body, "enable_thinking").Bool())
+	require.False(t, gjson.Get(body, "thinking").Exists())
 	require.False(t, gjson.Get(body, "reasoning_effort").Exists())
+}
+
+func TestBailianTransformRequest_AnthropicInboundThinkingAndOutputConfigToDashScope(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 64000,
+			"thinking": {
+				"type": "adaptive",
+				"display": "summarized"
+			},
+			"output_config": {
+				"effort": "max"
+			},
+			"messages": [
+				{"role": "user", "content": "hi"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "qwen3.7-max-2026-06-08"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.True(t, gjson.Get(body, "enable_thinking").Bool())
+	require.Equal(t, "max", gjson.Get(body, "reasoning_effort").String())
+	require.False(t, gjson.Get(body, "thinking").Exists())
+	require.False(t, gjson.Get(body, "output_config").Exists())
+}
+
+func TestBailianTransformRequest_AnthropicInboundOutputConfigOnlyToReasoningEffort(t *testing.T) {
+	inbound := anthropictransformer.NewInboundTransformer()
+	llmReq, err := inbound.TransformRequest(context.Background(), &httpclient.Request{
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body: []byte(`{
+			"model": "claude-sonnet-4-5",
+			"max_tokens": 64000,
+			"output_config": {
+				"effort": "max"
+			},
+			"messages": [
+				{"role": "user", "content": "hi"}
+			]
+		}`),
+	})
+	require.NoError(t, err)
+
+	llmReq.Model = "any-bailian-openai-compatible-model"
+
+	outbound, err := NewOutboundTransformerWithConfig(&Config{
+		BaseURL:        "https://example.com",
+		APIKeyProvider: auth.NewStaticKeyProvider("test-key"),
+	})
+	require.NoError(t, err)
+
+	httpReq, err := outbound.TransformRequest(context.Background(), llmReq)
+	require.NoError(t, err)
+
+	body := string(httpReq.Body)
+	require.Equal(t, "max", gjson.Get(body, "reasoning_effort").String())
+	require.False(t, gjson.Get(body, "enable_thinking").Exists())
+	require.False(t, gjson.Get(body, "thinking").Exists())
+	require.False(t, gjson.Get(body, "output_config").Exists())
 }
 
 func TestBailianTransformRequest_AnthropicInboundCacheControl(t *testing.T) {

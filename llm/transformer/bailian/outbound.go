@@ -75,10 +75,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	applyBailianOpenAICacheControl(req, llmReq)
 	applyBailianToolMessageContentCompatibility(req)
 
-	if applyBailianDeepSeekV4Thinking(req, llmReq) {
-		return req, nil
-	}
-
 	applyBailianAnthropicThinking(req, llmReq)
 
 	return req, nil
@@ -468,68 +464,85 @@ func firstToolCacheControl(req *llm.Request) *llm.CacheControl {
 	return nil
 }
 
-func applyBailianDeepSeekV4Thinking(httpReq *httpclient.Request, llmReq *llm.Request) bool {
-	control, ok := llm.ResolveDeepSeekV4ThinkingControl(llmReq)
-	if !ok || httpReq == nil || len(httpReq.Body) == 0 {
-		return false
-	}
-
-	body, err := sjson.DeleteBytes(httpReq.Body, "thinking")
-	if err != nil {
-		return true
-	}
-
-	body, err = sjson.SetBytes(body, "enable_thinking", control.Enabled)
-	if err != nil {
-		return true
-	}
-
-	if control.Enabled {
-		body, err = sjson.SetBytes(body, "reasoning_effort", control.Effort)
-	} else {
-		body, err = sjson.DeleteBytes(body, "reasoning_effort")
-	}
-	if err != nil {
-		return true
-	}
-
-	httpReq.Body = body
-
-	return true
-}
-
 func applyBailianAnthropicThinking(httpReq *httpclient.Request, llmReq *llm.Request) {
 	if httpReq == nil || llmReq == nil || len(httpReq.Body) == 0 {
 		return
 	}
 
-	thinkingType, _ := llmReq.TransformerMetadata[anthropictransformer.TransformerMetadataKeyThinkingType].(string)
-	switch strings.ToLower(strings.TrimSpace(thinkingType)) {
-	case "enabled", "adaptive":
-		body, err := sjson.SetBytes(httpReq.Body, "enable_thinking", true)
-		if err != nil {
-			return
-		}
+	body := httpReq.Body
+	var err error
 
-		body, err = sjson.DeleteBytes(body, "reasoning_effort")
-		if err != nil {
-			return
-		}
-
-		httpReq.Body = body
-	case "disabled":
-		body, err := sjson.SetBytes(httpReq.Body, "enable_thinking", false)
-		if err != nil {
-			return
-		}
-
-		body, err = sjson.DeleteBytes(body, "reasoning_effort")
-		if err != nil {
-			return
-		}
-
-		httpReq.Body = body
+	body, err = sjson.DeleteBytes(body, "enable_thinking")
+	if err != nil {
+		return
 	}
+
+	thinkingType, _ := llmReq.TransformerMetadata[anthropictransformer.TransformerMetadataKeyThinkingType].(string)
+	thinkingType = strings.ToLower(strings.TrimSpace(thinkingType))
+	outputEffort, _ := llmReq.TransformerMetadata[anthropictransformer.TransformerMetadataKeyOutputConfigEffort].(string)
+	outputEffort = strings.TrimSpace(outputEffort)
+
+	if thinkingType == "" && outputEffort == "" {
+		body, err = sjson.DeleteBytes(body, "thinking")
+		if err != nil {
+			return
+		}
+
+		body, err = sjson.DeleteBytes(body, "output_config")
+		if err != nil {
+			return
+		}
+
+		if llmReq.ReasoningEffort == "" {
+			body, err = sjson.DeleteBytes(body, "reasoning_effort")
+		} else {
+			body, err = sjson.SetBytes(body, "reasoning_effort", llmReq.ReasoningEffort)
+		}
+		if err != nil {
+			return
+		}
+
+		httpReq.Body = body
+
+		return
+	}
+
+	body, err = sjson.DeleteBytes(body, "thinking")
+	if err != nil {
+		return
+	}
+
+	body, err = sjson.DeleteBytes(body, "output_config")
+	if err != nil {
+		return
+	}
+
+	switch thinkingType {
+	case "enabled", "adaptive":
+		body, err = sjson.SetBytes(body, "enable_thinking", true)
+		if err != nil {
+			return
+		}
+	case "disabled":
+		body, err = sjson.SetBytes(body, "enable_thinking", false)
+		if err != nil {
+			return
+		}
+	}
+
+	if outputEffort != "" {
+		body, err = sjson.SetBytes(body, "reasoning_effort", outputEffort)
+		if err != nil {
+			return
+		}
+	} else {
+		body, err = sjson.DeleteBytes(body, "reasoning_effort")
+		if err != nil {
+			return
+		}
+	}
+
+	httpReq.Body = body
 }
 
 func mergeConsecutiveToolCallMessages(req *llm.Request) *llm.Request {
