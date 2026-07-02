@@ -81,6 +81,13 @@ type PersistenceState struct {
 
 	// PassThroughApplied records whether the inbound request body was substituted during pass-through.
 	PassThroughApplied bool
+
+	// OutboundStreamError records an error surfaced by the outbound transform layer for the
+	// current attempt (e.g. an in-stream SSE `error` event parsed by the outbound transformer).
+	// The raw provider stream underneath OutboundPersistentStream ends cleanly in that case, so
+	// without this field the execution would be persisted with a generic "stream ended without
+	// terminal event" error instead of the real upstream error.
+	OutboundStreamError error
 }
 
 func (s *PersistenceState) ReleaseRequestPayloads() {

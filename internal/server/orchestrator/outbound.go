@@ -110,6 +110,14 @@ func (ts *OutboundPersistentStream) Close() error {
 	log.Debug(ctx, "Closing persistent stream", log.Int("chunk_count", len(ts.responseChunks)), log.Bool("received_done", ts.state.StreamCompleted))
 
 	streamErr := ts.stream.Err()
+	if streamErr == nil {
+		// The outbound transformer may surface in-stream provider errors (e.g. an SSE
+		// `error` event) above this layer, in which case the raw stream underneath ends
+		// cleanly. Fall back to the error recorded by the transform layer so the real
+		// upstream error is persisted instead of a generic incomplete-stream message.
+		streamErr = ts.state.OutboundStreamError
+	}
+
 	ctxErr := ctx.Err()
 
 	// If we received the [DONE] event, treat the stream as successfully completed
@@ -388,6 +396,7 @@ func (p *PersistentOutboundTransformer) TransformRequest(ctx context.Context, ll
 
 	p.state.CurrentCandidate = candidate
 	p.state.StreamCompleted = false
+	p.state.OutboundStreamError = nil
 
 	p.wrapped = selectOutboundForCandidate(candidate)
 
@@ -495,7 +504,33 @@ func (p *PersistentOutboundTransformer) TransformStream(ctx context.Context, req
 		p.state,
 	)
 
-	return p.wrapped.TransformStream(ctx, req, persistentStream)
+	llmStream, err := p.wrapped.TransformStream(ctx, req, persistentStream)
+	if err != nil {
+		return nil, err
+	}
+
+	// Record transform-layer stream errors (e.g. parsed in-stream SSE `error` events) into
+	// the shared state so OutboundPersistentStream.Close can persist the real upstream error.
+	return &outboundStreamErrorRecorder{Stream: llmStream, state: p.state}, nil
+}
+
+// outboundStreamErrorRecorder captures the error a transformed outbound stream ends with.
+// The outbound transformer sits above OutboundPersistentStream, so errors it synthesizes
+// from in-stream provider error events are invisible to the persistent stream's Err().
+type outboundStreamErrorRecorder struct {
+	streams.Stream[*llm.Response]
+	state *PersistenceState
+}
+
+func (r *outboundStreamErrorRecorder) Next() bool {
+	ok := r.Stream.Next()
+	if !ok {
+		if err := r.Stream.Err(); err != nil {
+			r.state.OutboundStreamError = err
+		}
+	}
+
+	return ok
 }
 
 func (p *PersistentOutboundTransformer) AggregateStreamChunks(

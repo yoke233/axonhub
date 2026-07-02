@@ -921,6 +921,127 @@ func TestOutboundPersistentStream_Close_AggregatedResponsesCompletionHandling(t 
 	})
 }
 
+type sliceResponseStream struct {
+	responses []*llm.Response
+	index     int
+	err       error
+	closed    bool
+}
+
+func (s *sliceResponseStream) Next() bool {
+	if s.index >= len(s.responses) {
+		return false
+	}
+
+	s.index++
+
+	return true
+}
+
+func (s *sliceResponseStream) Current() *llm.Response {
+	if s.index == 0 || s.index > len(s.responses) {
+		return nil
+	}
+
+	return s.responses[s.index-1]
+}
+
+func (s *sliceResponseStream) Err() error {
+	return s.err
+}
+
+func (s *sliceResponseStream) Close() error {
+	s.closed = true
+	return nil
+}
+
+func TestOutboundStreamErrorRecorder_RecordsTransformLayerError(t *testing.T) {
+	streamErr := &llm.ResponseError{
+		Detail: llm.ErrorDetail{
+			Message: "Output data may contain inappropriate content.",
+			Code:    "data_inspection_failed",
+		},
+	}
+	state := &PersistenceState{}
+	recorder := &outboundStreamErrorRecorder{
+		Stream: &sliceResponseStream{err: streamErr},
+		state:  state,
+	}
+
+	require.False(t, recorder.Next())
+	require.ErrorIs(t, state.OutboundStreamError, streamErr)
+}
+
+func TestOutboundPersistentStream_Close_TransformLayerStreamError(t *testing.T) {
+	ctx := context.Background()
+	ctx = authz.WithTestBypass(ctx)
+
+	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx = ent.NewContext(ctx, client)
+	project := createTestProject(t, ctx, client)
+	ch := createTestChannel(t, ctx, client)
+	_, requestService, _, usageLogService := setupTestServices(t, client)
+
+	req, err := client.Request.Create().
+		SetProjectID(project.ID).
+		SetChannelID(ch.ID).
+		SetModelID("qwen3.5-flash").
+		SetStatus(request.StatusPending).
+		SetRequestBody([]byte(`{"stream":true}`)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	exec, err := client.RequestExecution.Create().
+		SetRequestID(req.ID).
+		SetProjectID(project.ID).
+		SetChannelID(ch.ID).
+		SetModelID("qwen3.5-flash").
+		SetRequestBody([]byte(`{"stream":true}`)).
+		SetFormat("anthropic/messages").
+		SetStatus(requestexecution.StatusPending).
+		SetStream(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// The raw provider stream delivers an in-stream error event and then ends cleanly
+	// (Err() == nil). The outbound transformer above the persistent stream parses the
+	// event into a ResponseError, which the recorder captures into shared state.
+	stream := &sliceEventStream{
+		events: []*httpclient.StreamEvent{
+			{Type: "error", Data: []byte(`{"type":"error","error":{"type":"data_inspection_failed","message":"Output data may contain inappropriate content."}}`)},
+		},
+	}
+	transformer := &mockTransformer{apiFormat: llm.APIFormatAnthropicMessage}
+	state := &PersistenceState{}
+
+	persistentStream := NewOutboundPersistentStream(ctx, stream, req, exec, requestService, usageLogService, transformer, nil, state)
+	for persistentStream.Next() {
+		_ = persistentStream.Current()
+	}
+
+	// Simulates outboundStreamErrorRecorder capturing the transform-layer error
+	// before the stream chain is closed.
+	state.OutboundStreamError = &llm.ResponseError{
+		StatusCode: http.StatusBadRequest,
+		Detail: llm.ErrorDetail{
+			Message: "Output data may contain inappropriate content.",
+			Code:    "data_inspection_failed",
+			Type:    "data_inspection_failed",
+		},
+	}
+
+	require.NoError(t, persistentStream.Close())
+
+	dbExec, err := client.RequestExecution.Get(ctx, exec.ID)
+	require.NoError(t, err)
+	require.Equal(t, requestexecution.StatusFailed, dbExec.Status)
+	require.Contains(t, dbExec.ErrorMessage, "data_inspection_failed")
+	require.Contains(t, dbExec.ErrorMessage, "Output data may contain inappropriate content.")
+	require.NotContains(t, dbExec.ErrorMessage, "stream ended without terminal event")
+}
+
 func TestPersistentOutboundTransformer_TransformRequest_WithPrepopulatedState(t *testing.T) {
 	// Setup
 	ctx := context.Background()
