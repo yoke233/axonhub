@@ -95,12 +95,7 @@ export default function DashboardPage() {
   const [modelTotalRequests, setModelTotalRequests] = useState(0);
   const [channelTotalRequests, setChannelTotalRequests] = useState(0);
 
-  const [channelTimePeriod, setChannelTimePeriod] = useState('allTime');
-  const [channelTokensTimePeriod, setChannelTokensTimePeriod] = useState('allTime');
-  const [modelTimePeriod, setModelTimePeriod] = useState('allTime');
-  const [modelTokensTimePeriod, setModelTokensTimePeriod] = useState('allTime');
-  const [apiKeyTimePeriod, setApiKeyTimePeriod] = useState('allTime');
-  const [apiKeyTokensTimePeriod, setApiKeyTokensTimePeriod] = useState('allTime');
+  const [timePeriod, setTimePeriod] = useState('week');
 
   const modelPerformanceDescription = useMemo(() => {
     return t('dashboard.charts.performanceDescription', { count: formatNumber(modelTotalRequests) });
@@ -146,7 +141,8 @@ export default function DashboardPage() {
     <div className='flex-1 space-y-6 p-8 pt-6'>
       <Header />
 
-      <div className='flex justify-end'>
+      <div className='flex flex-wrap items-center justify-end gap-2'>
+        <TimePeriodSelector value={timePeriod} onChange={setTimePeriod} allowCustom />
         <StatsExportDialog />
       </div>
 
@@ -179,7 +175,7 @@ export default function DashboardPage() {
               </CardAction>
             </CardHeader>
             <CardContent>
-              <ChannelSuccessRate />
+              <ChannelSuccessRate timeWindow={timePeriod} />
             </CardContent>
           </Card>
         </div>
@@ -196,24 +192,18 @@ export default function DashboardPage() {
             <CardHeader>
               <CardTitle>{t('dashboard.charts.requestsCostByChannel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByChannelDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={channelTimePeriod} onChange={setChannelTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <RequestsByChannelChart timePeriod={channelTimePeriod} />
+              <RequestsByChannelChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
           <Card className='hover-card'>
             <CardHeader>
               <CardTitle>{t('dashboard.charts.tokensByChannel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByChannelDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={channelTokensTimePeriod} onChange={setChannelTokensTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <TokensByChannelChart timePeriod={channelTokensTimePeriod} />
+              <TokensByChannelChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
         </div>
@@ -230,24 +220,18 @@ export default function DashboardPage() {
             <CardHeader>
               <CardTitle>{t('dashboard.charts.requestsCostByModel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByModelDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={modelTimePeriod} onChange={setModelTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <RequestsByModelChart timePeriod={modelTimePeriod} />
+              <RequestsByModelChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
           <Card className='hover-card'>
             <CardHeader>
               <CardTitle>{t('dashboard.charts.tokensByModel')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByModelDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={modelTokensTimePeriod} onChange={setModelTokensTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <TokensByModelChart timePeriod={modelTokensTimePeriod} />
+              <TokensByModelChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
         </div>
@@ -264,24 +248,18 @@ export default function DashboardPage() {
             <CardHeader>
               <CardTitle>{t('dashboard.charts.requestsCostByAPIKey')}</CardTitle>
               <CardDescription>{t('dashboard.charts.requestsCostByAPIKeyDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={apiKeyTimePeriod} onChange={setApiKeyTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <RequestsByAPIKeyChart timePeriod={apiKeyTimePeriod} />
+              <RequestsByAPIKeyChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
           <Card className='hover-card'>
             <CardHeader>
               <CardTitle>{t('dashboard.charts.tokensByAPIKey')}</CardTitle>
               <CardDescription>{t('dashboard.charts.tokensByAPIKeyDescription')}</CardDescription>
-              <CardAction>
-                <TimePeriodSelector value={apiKeyTokensTimePeriod} onChange={setApiKeyTokensTimePeriod} allowCustom />
-              </CardAction>
             </CardHeader>
             <CardContent>
-              <TokensByAPIKeyChart timePeriod={apiKeyTokensTimePeriod} />
+              <TokensByAPIKeyChart timePeriod={timePeriod} />
             </CardContent>
           </Card>
         </div>
