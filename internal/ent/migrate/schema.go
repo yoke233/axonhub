@@ -640,6 +640,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{RequestExecutionsColumns[20], RequestExecutionsColumns[1]},
 			},
+			{
+				Name:    "request_executions_by_created_at_channel_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{RequestExecutionsColumns[1], RequestExecutionsColumns[20], RequestExecutionsColumns[12]},
+			},
 		},
 	}
 	// RolesColumns holds the columns for the "roles" table.

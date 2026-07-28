@@ -31,6 +31,12 @@ func (RequestExecution) Indexes() []ent.Index {
 			StorageKey("request_executions_by_request_id_created_at"),
 		index.Fields("channel_id", "created_at").
 			StorageKey("request_executions_by_channel_id_created_at"),
+		// Covering index for the dashboard channel success-rate aggregation,
+		// which scans a time window and groups by channel. Leading with
+		// created_at keeps inserts appending to the index tail; without it the
+		// aggregation degrades to a full table scan.
+		index.Fields("created_at", "channel_id", "status").
+			StorageKey("request_executions_by_created_at_channel_id_status"),
 	}
 }
 

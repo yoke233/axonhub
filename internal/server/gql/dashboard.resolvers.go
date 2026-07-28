@@ -19,7 +19,6 @@ import (
 	"github.com/looplj/axonhub/internal/ent/apikey"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/project"
-	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/ent/requestexecution"
 	"github.com/looplj/axonhub/internal/ent/schema/schematype"
 	"github.com/looplj/axonhub/internal/ent/usagelog"
@@ -45,23 +44,13 @@ func (r *queryResolver) DashboardOverview(ctx context.Context) (*DashboardOvervi
 		AverageResponseTime: nil,
 	}
 
-	// Get total and failed requests in a single query by status grouping
-	var statusCounts []struct {
-		Status request.Status `json:"status"`
-		Count  int            `json:"count"`
-	}
-	if err := r.client.Request.Query().
-		GroupBy(request.FieldStatus).
-		Aggregate(ent.Count()).
-		Scan(ctx, &statusCounts); err != nil {
+	// Get total and failed requests from the SWR-cached status counts to avoid
+	// scanning the whole requests table on every dashboard load.
+	if counts, err := r.requestStatusCounts(ctx); err != nil {
 		log.Warn(ctx, "failed to count requests by status", log.Cause(err))
 	} else {
-		for _, sc := range statusCounts {
-			stats.TotalRequests += sc.Count
-			if sc.Status == request.StatusFailed {
-				stats.FailedRequests = sc.Count
-			}
-		}
+		stats.TotalRequests = counts.Total
+		stats.FailedRequests = counts.Failed
 	}
 
 	// Get request stats using the dedicated resolver
@@ -102,36 +91,34 @@ func (r *queryResolver) RequestStats(ctx context.Context) (*RequestStats, error)
 	loc := r.systemService.TimeLocation(ctx)
 	period := xtime.GetCalendarPeriods(loc)
 
-	if requestsToday, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.Today.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count today's requests", log.Cause(err))
-	} else {
-		stats.RequestsToday = requestsToday
+	// All period boundaries are local midnights, so a single scan bucketed by
+	// local date can serve today/this week/last week/this month exactly. The
+	// scan is shared with TokenStats and DailyRequestStats.
+	usage, err := r.dashboardDailyUsage(ctx)
+	if err != nil {
+		log.Warn(ctx, "failed to count requests by period", log.Cause(err))
+		return stats, nil
 	}
 
-	if requestsThisWeek, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.ThisWeek.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count this week's requests", log.Cause(err))
-	} else {
-		stats.RequestsThisWeek = requestsThisWeek
-	}
+	const dateLayout = "2006-01-02"
+	todayDate := period.Today.Start.In(loc).Format(dateLayout)
+	thisWeekDate := period.ThisWeek.Start.In(loc).Format(dateLayout)
+	lastWeekDate := period.LastWeek.Start.In(loc).Format(dateLayout)
+	thisMonthDate := period.ThisMonth.Start.In(loc).Format(dateLayout)
 
-	if requestsLastWeek, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.LastWeek.Start), usagelog.CreatedAtLT(period.LastWeek.End)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count last week's requests", log.Cause(err))
-	} else {
-		stats.RequestsLastWeek = requestsLastWeek
-	}
-
-	if requestsThisMonth, err := r.client.UsageLog.Query().
-		Where(usagelog.CreatedAtGTE(period.ThisMonth.Start)).
-		Count(ctx); err != nil {
-		log.Warn(ctx, "failed to count this month's requests", log.Cause(err))
-	} else {
-		stats.RequestsThisMonth = requestsThisMonth
+	for _, row := range usage.Buckets {
+		if row.Date >= todayDate {
+			stats.RequestsToday += row.Count
+		}
+		if row.Date >= thisWeekDate {
+			stats.RequestsThisWeek += row.Count
+		}
+		if row.Date >= lastWeekDate && row.Date < thisWeekDate {
+			stats.RequestsLastWeek += row.Count
+		}
+		if row.Date >= thisMonthDate {
+			stats.RequestsThisMonth += row.Count
+		}
 	}
 
 	return stats, nil
@@ -145,48 +132,17 @@ func (r *queryResolver) RequestStatsByChannel(ctx context.Context, timeWindow *s
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	// Use efficient aggregation query with JOIN to get channel details and filter out deleted channels
-	type channelStats struct {
-		ChannelName string `json:"channel_name"`
-		Count       int    `json:"count"`
-	}
-
-	var results []channelStats
-
-	// Aggregate by channel directly in the database using usage_logs table joined with channels
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			channelTable := sql.Table(channel.Table)
-			s.Join(channelTable).On(
-				s.C(usagelog.FieldChannelID),
-				channelTable.C(channel.FieldID),
-			)
-
-			// Filter: only non-deleted channels
-			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
-
-			// Apply time window filter when provided
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			// Group by channel fields to get names and types directly
-			s.GroupBy(channelTable.C(channel.FieldName))
-
-			// Select fields: channel name, type and the count of logs
-			s.Select(
-				sql.As(channelTable.C(channel.FieldName), "channel_name"),
-				sql.As(sql.Count(s.C(usagelog.FieldID)), "count"),
-			)
-
-			// Order by count descending and limit to top 10
-			s.OrderBy(sql.Desc("count")).Limit(10)
-		}).
-		Scan(ctx, &results)
+	// Shares one aggregation with the cost and token charts for this dimension.
+	rows, err := r.channelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get requests by channel: %w", err)
 	}
 
-	// Build response directly from aggregated results
-	return lo.Map(results, func(item channelStats, _ int) *RequestStatsByChannel {
+	top := dimensionTopN(mergeChannelRowsByName(rows), 10, func(a, b channelUsageRow) bool {
+		return a.Count > b.Count
+	})
+
+	return lo.Map(top, func(item channelUsageRow, _ int) *RequestStatsByChannel {
 		return &RequestStatsByChannel{
 			ChannelName: item.ChannelName,
 			Count:       item.Count,
@@ -202,48 +158,22 @@ func (r *queryResolver) RequestStatsByModel(ctx context.Context, timeWindow *str
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type modelStats struct {
-		ModelID string `json:"model_id"`
-		Count   int    `json:"request_count"`
-	}
-
-	var results []modelStats
-
-	query := r.client.UsageLog.Query()
-
-	// Apply time window filter when provided
-	if timeFilter.hasStart() {
-		query = query.Where(usagelog.CreatedAtGTE(timeFilter.since))
-	}
-	if timeFilter.hasEnd() {
-		query = query.Where(usagelog.CreatedAtLTE(timeFilter.until))
-	}
-
-	err := query.
-		GroupBy(usagelog.FieldModelID).
-		Aggregate(ent.As(ent.Count(), "request_count")).
-		Scan(ctx, &results)
+	rows, err := r.modelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get requests by model: %w", err)
 	}
 
 	// Order by request count and keep only top 10
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Count > results[j].Count
+	top := dimensionTopN(rows, 10, func(a, b modelUsageRow) bool {
+		return a.Count > b.Count
 	})
 
-	if len(results) > 10 {
-		results = results[:10]
-	}
-
-	stats := lo.Map(results, func(item modelStats, _ int) *RequestStatsByModel {
+	return lo.Map(top, func(item modelUsageRow, _ int) *RequestStatsByModel {
 		return &RequestStatsByModel{
 			ModelID: item.ModelID,
 			Count:   item.Count,
 		}
-	})
-
-	return stats, nil
+	}), nil
 }
 
 // RequestStatsByAPIKey is the resolver for the requestStatsByAPIKey field.
@@ -254,48 +184,22 @@ func (r *queryResolver) RequestStatsByAPIKey(ctx context.Context, timeWindow *st
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type apiKeyStats struct {
-		APIKeyID int `json:"api_key_id"`
-		Count    int `json:"request_count"`
-	}
-
-	var results []apiKeyStats
-
-	// Database-level aggregation
-	query := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil())
-
-	// Apply time window filter when provided
-	if timeFilter.hasStart() {
-		query = query.Where(usagelog.CreatedAtGTE(timeFilter.since))
-	}
-	if timeFilter.hasEnd() {
-		query = query.Where(usagelog.CreatedAtLTE(timeFilter.until))
-	}
-
-	err := query.
-		GroupBy(usagelog.FieldAPIKeyID).
-		Aggregate(ent.As(ent.Count(), "request_count")).
-		Scan(ctx, &results)
+	rows, err := r.apiKeyUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get requests by API key: %w", err)
 	}
 
-	if len(results) == 0 {
+	if len(rows) == 0 {
 		return []*RequestStatsByAPIKey{}, nil
 	}
 
 	// Sort by count (descending) and limit to top 10
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Count > results[j].Count
+	results := dimensionTopN(rows, 10, func(a, b apiKeyUsageRow) bool {
+		return a.Count > b.Count
 	})
 
-	if len(results) > 10 {
-		results = results[:10]
-	}
-
 	// Extract API key IDs
-	apiKeyIDs := lo.Map(results, func(item apiKeyStats, _ int) int {
+	apiKeyIDs := lo.Map(results, func(item apiKeyUsageRow, _ int) int {
 		return item.APIKeyID
 	})
 
@@ -336,52 +240,21 @@ func (r *queryResolver) TokenStatsByAPIKey(ctx context.Context, timeWindow *stri
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type tokenStats struct {
-		APIKeyID        int   `json:"api_key_id"`
-		InputTokens     int64 `json:"input_tokens"`
-		OutputTokens    int64 `json:"output_tokens"`
-		CachedTokens    int64 `json:"cached_tokens"`
-		ReasoningTokens int64 `json:"reasoning_tokens"`
-	}
-
-	var results []tokenStats
-
-	// Aggregate directly on usage_logs.api_key_id. Joining to requests is unnecessary
-	// (the column is already on usage_logs) and breaks once the requests table is
-	// pruned by GC retention while usage_logs are still kept.
-	err := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil()).
-		Modify(func(s *sql.Selector) {
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
-
-			s.Select(
-				sql.As(s.C(usagelog.FieldAPIKeyID), "api_key_id"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptTokens)), "input_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
-			)
-
-			// Order by billable total (input + output). Reasoning is already inside
-			// completion_tokens, so adding it would double-count.
-			s.OrderBy(sql.Desc(fmt.Sprintf("COALESCE(SUM(%s), 0) + COALESCE(SUM(%s), 0)",
-				s.C(usagelog.FieldPromptTokens),
-				s.C(usagelog.FieldCompletionTokens))))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.apiKeyUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tokens by API key: %w", err)
 	}
 
-	if len(results) == 0 {
+	if len(rows) == 0 {
 		return []*TokenStatsByAPIKey{}, nil
 	}
 
+	results := dimensionTopN(rows, 10, func(a, b apiKeyUsageRow) bool {
+		return a.billableTokens() > b.billableTokens()
+	})
+
 	// Extract API key IDs
-	apiKeyIDs := lo.Map(results, func(item tokenStats, _ int) int {
+	apiKeyIDs := lo.Map(results, func(item apiKeyUsageRow, _ int) int {
 		return item.APIKeyID
 	})
 
@@ -523,63 +396,18 @@ func (r *queryResolver) DailyRequestStats(ctx context.Context) ([]*DailyRequestS
 	daysCount := 30
 
 	loc := r.systemService.TimeLocation(ctx)
-	nowUTC := xtime.UTCNow()
-	nowLocal := nowUTC.In(loc)
+	nowLocal := xtime.UTCNow().In(loc)
 	startDateLocal := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -daysCount+1)
-	startDateUTC := startDateLocal.UTC()
-	_, offsetSeconds := nowLocal.Zone()
 
-	// Use GROUP BY aggregation for efficient database-level computation
-	type dailyStats struct {
-		Date   string  `json:"date"`
-		Count  int     `json:"total_count"`
-		Tokens int     `json:"total_tokens"`
-		Cost   float64 `json:"total_cost"`
-	}
-
-	var results []dailyStats
-
-	// Use raw SQL for complex GROUP BY with conditional counting
-	err := r.client.UsageLog.Query().
-		Where(
-			usagelog.CreatedAtGTE(startDateUTC),
-			usagelog.CreatedAtLT(nowUTC),
-		).
-		Modify(func(s *sql.Selector) {
-			// Build a dialect-specific date expression that returns a string 'YYYY-MM-DD'
-			var dateExpr string
-			// Use qualified column name to avoid ambiguity when joining
-			createdAtCol := s.C(usagelog.FieldCreatedAt)
-
-			switch s.Dialect() {
-			case dialect.SQLite:
-				dateExpr = fmt.Sprintf("strftime('%%Y-%%m-%%d', datetime(substr(%s, 1, 19), '%+d seconds'))", createdAtCol, offsetSeconds)
-			case dialect.MySQL:
-				offsetStr := xtime.FormatUTCOffset(offsetSeconds)
-				dateExpr = fmt.Sprintf("DATE_FORMAT(CONVERT_TZ(%s, '+00:00', '%s'), '%%Y-%%m-%%d')", createdAtCol, offsetStr)
-			case dialect.Postgres:
-				dateExpr = fmt.Sprintf("to_char(%s AT TIME ZONE '%s', 'YYYY-MM-DD')", createdAtCol, loc.String())
-			default:
-				// Fallback to ANSI-ish cast; many DBs accept this, but not guaranteed
-				dateExpr = fmt.Sprintf("DATE(%s)", createdAtCol)
-			}
-
-			s.Select(
-				sql.As(dateExpr, "date"),
-				sql.As(sql.Count(s.C(usagelog.FieldID)), "total_count"),
-				sql.As(sql.Sum(s.C(usagelog.FieldTotalTokens)), "total_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			).
-				GroupBy(dateExpr).
-				OrderBy("date")
-		}).
-		Scan(ctx, &results)
+	// The per-day aggregation is shared with RequestStats and TokenStats; its
+	// window is wider than the 30 days charted here, so slice by date below.
+	usage, err := r.dashboardDailyUsage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get daily request stats: %w", err)
 	}
 
 	// Create a map for fast lookup of aggregated data
-	statsMap := lo.SliceToMap(results, func(item dailyStats) (string, dailyStats) {
+	statsMap := lo.SliceToMap(usage.Buckets, func(item dailyUsageBucket) (string, dailyUsageBucket) {
 		return item.Date, item
 	})
 
@@ -595,7 +423,7 @@ func (r *queryResolver) DailyRequestStats(ctx context.Context) ([]*DailyRequestS
 			response = append(response, &DailyRequestStats{
 				Date:   dateStr,
 				Count:  stats.Count,
-				Tokens: stats.Tokens,
+				Tokens: stats.TotalTokens,
 				Cost:   stats.Cost,
 			})
 		} else {
@@ -702,63 +530,36 @@ func (r *queryResolver) TokenStats(ctx context.Context) (*TokenStats, error) {
 	loc := r.systemService.TimeLocation(ctx)
 	period := xtime.GetCalendarPeriods(loc)
 
-	// Helper function to get token sums for a specific time period
-	getTokenSums := func(since time.Time) (input, output, cached int) {
-		type tokenSums struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			CachedTokens int `json:"cached_tokens"`
+	// All period boundaries are local midnights, so a single scan bucketed by
+	// local date can serve today/this week/this month exactly. The scan is
+	// shared with RequestStats and DailyRequestStats.
+	usage, err := r.dashboardDailyUsage(ctx)
+	if err != nil {
+		log.Warn(ctx, "failed to aggregate token stats", log.Cause(err))
+	} else {
+		const dateLayout = "2006-01-02"
+		todayDate := period.Today.Start.In(loc).Format(dateLayout)
+		thisWeekDate := period.ThisWeek.Start.In(loc).Format(dateLayout)
+		thisMonthDate := period.ThisMonth.Start.In(loc).Format(dateLayout)
+
+		for _, rec := range usage.Buckets {
+			if rec.Date >= todayDate {
+				stats.TotalInputTokensToday += rec.InputTokens
+				stats.TotalOutputTokensToday += rec.OutputTokens
+				stats.TotalCachedTokensToday += rec.CachedTokens
+			}
+			if rec.Date >= thisWeekDate {
+				stats.TotalInputTokensThisWeek += rec.InputTokens
+				stats.TotalOutputTokensThisWeek += rec.OutputTokens
+				stats.TotalCachedTokensThisWeek += rec.CachedTokens
+			}
+			if rec.Date >= thisMonthDate {
+				stats.TotalInputTokensThisMonth += rec.InputTokens
+				stats.TotalOutputTokensThisMonth += rec.OutputTokens
+				stats.TotalCachedTokensThisMonth += rec.CachedTokens
+			}
 		}
-
-		var records []tokenSums
-
-		err := r.client.UsageLog.Query().
-			Where(usagelog.CreatedAtGTE(since)).
-			Modify(func(s *sql.Selector) {
-				s.Select(
-					sql.As(sql.Sum(usagelog.FieldPromptTokens), "input_tokens"),
-					sql.As(sql.Sum(usagelog.FieldCompletionTokens), "output_tokens"),
-					sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				)
-			}).
-			Scan(ctx, &records)
-		if err != nil || len(records) == 0 {
-			log.Warn(ctx, "failed to aggregate token stats", log.Cause(err))
-			return 0, 0, 0
-		}
-
-		inputVal := records[0].InputTokens
-		outputVal := records[0].OutputTokens
-		cachedVal := records[0].CachedTokens
-
-		if log.DebugEnabled(ctx) {
-			log.Debug(ctx, "token stats query result",
-				log.String("since", since.Format("2006-01-02 15:04:05")),
-				log.Int("input", inputVal),
-				log.Int("output", outputVal),
-				log.Int("cached", cachedVal))
-		}
-
-		return inputVal, outputVal, cachedVal
 	}
-
-	// Get token stats for today
-	input, output, cached := getTokenSums(period.Today.Start)
-	stats.TotalInputTokensToday = input
-	stats.TotalOutputTokensToday = output
-	stats.TotalCachedTokensToday = cached
-
-	// Get token stats for this week (calendar week from Monday)
-	input, output, cached = getTokenSums(period.ThisWeek.Start)
-	stats.TotalInputTokensThisWeek = input
-	stats.TotalOutputTokensThisWeek = output
-	stats.TotalCachedTokensThisWeek = cached
-
-	// Get token stats for this month (calendar month from 1st)
-	input, output, cached = getTokenSums(period.ThisMonth.Start)
-	stats.TotalInputTokensThisMonth = input
-	stats.TotalOutputTokensThisMonth = output
-	stats.TotalCachedTokensThisMonth = cached
 
 	// Get all-time token stats with stale-while-revalidate caching
 	allTimeCacheMu.RLock()
@@ -1470,54 +1271,16 @@ func (r *queryResolver) TokenStatsByChannel(ctx context.Context, timeWindow *str
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type channelTokenStats struct {
-		ChannelID       int    `json:"channel_id"`
-		ChannelName     string `json:"channel_name"`
-		InputTokens     int64  `json:"input_tokens"`
-		OutputTokens    int64  `json:"output_tokens"`
-		CachedTokens    int64  `json:"cached_tokens"`
-		ReasoningTokens int64  `json:"reasoning_tokens"`
-	}
-
-	var results []channelTokenStats
-
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			channelTable := sql.Table(channel.Table)
-			s.Join(channelTable).On(
-				s.C(usagelog.FieldChannelID),
-				channelTable.C(channel.FieldID),
-			)
-
-			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
-
-			// Apply time window filter when provided
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(channelTable.C(channel.FieldID), channelTable.C(channel.FieldName))
-
-			s.Select(
-				sql.As(channelTable.C(channel.FieldID), "channel_id"),
-				sql.As(channelTable.C(channel.FieldName), "channel_name"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptTokens)), "input_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
-			)
-
-			// Order by billable total (input + output). Reasoning is already inside
-			// completion_tokens, so adding it would double-count.
-			s.OrderBy(sql.Desc(fmt.Sprintf("COALESCE(SUM(%s), 0) + COALESCE(SUM(%s), 0)",
-				s.C(usagelog.FieldPromptTokens),
-				s.C(usagelog.FieldCompletionTokens))))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.channelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tokens by channel: %w", err)
 	}
 
-	return lo.Map(results, func(item channelTokenStats, _ int) *TokenStatsByChannel {
+	results := dimensionTopN(rows, 10, func(a, b channelUsageRow) bool {
+		return a.billableTokens() > b.billableTokens()
+	})
+
+	return lo.Map(results, func(item channelUsageRow, _ int) *TokenStatsByChannel {
 		totalTokens := item.InputTokens + item.OutputTokens
 
 		return &TokenStatsByChannel{
@@ -1538,44 +1301,16 @@ func (r *queryResolver) TokenStatsByModel(ctx context.Context, timeWindow *strin
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type modelTokenStats struct {
-		ModelID         string `json:"model_id"`
-		InputTokens     int64  `json:"input_tokens"`
-		OutputTokens    int64  `json:"output_tokens"`
-		CachedTokens    int64  `json:"cached_tokens"`
-		ReasoningTokens int64  `json:"reasoning_tokens"`
-	}
-
-	var results []modelTokenStats
-
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			// Apply time window filter when provided
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(s.C(usagelog.FieldModelID))
-
-			s.Select(
-				s.C(usagelog.FieldModelID),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptTokens)), "input_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionTokens)), "output_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldPromptCachedTokens)), "cached_tokens"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldCompletionReasoningTokens)), "reasoning_tokens"),
-			)
-
-			// Order by billable total (input + output). Reasoning is already inside
-			// completion_tokens, so adding it would double-count.
-			s.OrderBy(sql.Desc(fmt.Sprintf("COALESCE(SUM(%s), 0) + COALESCE(SUM(%s), 0)",
-				s.C(usagelog.FieldPromptTokens),
-				s.C(usagelog.FieldCompletionTokens))))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.modelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tokens by model: %w", err)
 	}
 
-	return lo.Map(results, func(item modelTokenStats, _ int) *TokenStatsByModel {
+	results := dimensionTopN(rows, 10, func(a, b modelUsageRow) bool {
+		return a.billableTokens() > b.billableTokens()
+	})
+
+	return lo.Map(results, func(item modelUsageRow, _ int) *TokenStatsByModel {
 		totalTokens := item.InputTokens + item.OutputTokens
 
 		return &TokenStatsByModel{
@@ -1595,42 +1330,16 @@ func (r *queryResolver) CostStatsByChannel(ctx context.Context, timeWindow *stri
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type channelCostStats struct {
-		ChannelName string  `json:"channel_name"`
-		Cost        float64 `json:"total_cost"`
-	}
-
-	var results []channelCostStats
-
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			channelTable := sql.Table(channel.Table)
-			s.Join(channelTable).On(
-				s.C(usagelog.FieldChannelID),
-				channelTable.C(channel.FieldID),
-			)
-
-			s.Where(sql.EQ(channelTable.C(channel.FieldDeletedAt), 0))
-
-			// Apply time window filtering
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(channelTable.C(channel.FieldName))
-
-			s.Select(
-				sql.As(channelTable.C(channel.FieldName), "channel_name"),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			)
-
-			s.OrderBy(sql.Desc("total_cost"))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.channelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cost by channel: %w", err)
 	}
 
-	return lo.Map(results, func(item channelCostStats, _ int) *CostStatsByChannel {
+	top := dimensionTopN(mergeChannelRowsByName(rows), 10, func(a, b channelUsageRow) bool {
+		return a.Cost > b.Cost
+	})
+
+	return lo.Map(top, func(item channelUsageRow, _ int) *CostStatsByChannel {
 		return &CostStatsByChannel{
 			ChannelName: item.ChannelName,
 			Cost:        item.Cost,
@@ -1644,34 +1353,16 @@ func (r *queryResolver) CostStatsByModel(ctx context.Context, timeWindow *string
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type modelCostStats struct {
-		ModelID string  `json:"model_id"`
-		Cost    float64 `json:"total_cost"`
-	}
-
-	var results []modelCostStats
-
-	err := r.client.UsageLog.Query().
-		Modify(func(s *sql.Selector) {
-			// Apply time window filtering
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(s.C(usagelog.FieldModelID))
-
-			s.Select(
-				s.C(usagelog.FieldModelID),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			)
-
-			s.OrderBy(sql.Desc("total_cost"))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.modelUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cost by model: %w", err)
 	}
 
-	return lo.Map(results, func(item modelCostStats, _ int) *CostStatsByModel {
+	results := dimensionTopN(rows, 10, func(a, b modelUsageRow) bool {
+		return a.Cost > b.Cost
+	})
+
+	return lo.Map(results, func(item modelUsageRow, _ int) *CostStatsByModel {
 		return &CostStatsByModel{
 			ModelID: item.ModelID,
 			Cost:    item.Cost,
@@ -1685,39 +1376,20 @@ func (r *queryResolver) CostStatsByAPIKey(ctx context.Context, timeWindow *strin
 
 	timeFilter := r.parseTimeWindow(ctx, timeWindow)
 
-	type apiKeyCostStats struct {
-		APIKeyID int     `json:"api_key_id"`
-		Cost     float64 `json:"total_cost"`
-	}
-
-	var results []apiKeyCostStats
-
-	err := r.client.UsageLog.Query().
-		Where(usagelog.APIKeyIDNotNil()).
-		Modify(func(s *sql.Selector) {
-			// Apply time window filtering
-			timeFilter.applySelector(s, s.C(usagelog.FieldCreatedAt))
-
-			s.GroupBy(s.C(usagelog.FieldAPIKeyID))
-
-			s.Select(
-				s.C(usagelog.FieldAPIKeyID),
-				sql.As(fmt.Sprintf("COALESCE(SUM(%s), 0)", s.C(usagelog.FieldTotalCost)), "total_cost"),
-			)
-
-			s.OrderBy(sql.Desc("total_cost"))
-			s.Limit(10)
-		}).
-		Scan(ctx, &results)
+	rows, err := r.apiKeyUsageStats(ctx, timeFilter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cost by API key: %w", err)
 	}
 
-	if len(results) == 0 {
+	if len(rows) == 0 {
 		return []*CostStatsByAPIKey{}, nil
 	}
 
-	apiKeyIDs := lo.Map(results, func(item apiKeyCostStats, _ int) int {
+	results := dimensionTopN(rows, 10, func(a, b apiKeyUsageRow) bool {
+		return a.Cost > b.Cost
+	})
+
+	apiKeyIDs := lo.Map(results, func(item apiKeyUsageRow, _ int) int {
 		return item.APIKeyID
 	})
 

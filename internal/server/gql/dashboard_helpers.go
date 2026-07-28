@@ -13,10 +13,14 @@ import (
 	"github.com/samber/lo"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/looplj/axonhub/internal/authz"
+	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channelprobe"
+	"github.com/looplj/axonhub/internal/ent/request"
 	"github.com/looplj/axonhub/internal/ent/usagelog"
 	"github.com/looplj/axonhub/internal/log"
 	"github.com/looplj/axonhub/internal/pkg/xtime"
+	"github.com/looplj/axonhub/internal/scopes"
 	"github.com/looplj/axonhub/internal/server/gql/qb"
 )
 
@@ -27,7 +31,18 @@ var (
 	softTTL             = 1 * time.Hour
 	hardTTL             = 24 * time.Hour
 	allTimeRefreshGroup singleflight.Group
+
+	requestCountsCache     *requestStatusCounts
+	requestCountsCacheTime time.Time
+	requestCountsCacheMu   sync.RWMutex
+	requestCountsSoftTTL   = 5 * time.Minute
 )
+
+// requestStatusCounts holds all-time request counts grouped by status.
+type requestStatusCounts struct {
+	Total  int
+	Failed int
+}
 
 // cacheResult holds the result of a cache refresh operation.
 type cacheResult struct {
@@ -49,6 +64,108 @@ func InvalidateAllTimeTokenStatsCache() {
 	allTimeCache = nil
 	allTimeCacheTime = time.Time{}
 	allTimeCacheMu.Unlock()
+}
+
+// InvalidateRequestStatusCountsCache clears the all-time request status counts cache.
+func InvalidateRequestStatusCountsCache() {
+	requestCountsCacheMu.Lock()
+	requestCountsCache = nil
+	requestCountsCacheTime = time.Time{}
+	requestCountsCacheMu.Unlock()
+}
+
+// localDateExpr returns a dialect-specific SQL expression that converts the
+// given UTC timestamp column to a local date string 'YYYY-MM-DD'.
+func localDateExpr(s *sql.Selector, column string, offsetSeconds int, loc *time.Location) string {
+	col := s.C(column)
+
+	switch s.Dialect() {
+	case dialect.SQLite:
+		return fmt.Sprintf("strftime('%%Y-%%m-%%d', datetime(substr(%s, 1, 19), '%+d seconds'))", col, offsetSeconds)
+	case dialect.MySQL:
+		return fmt.Sprintf("DATE_FORMAT(CONVERT_TZ(%s, '+00:00', '%s'), '%%Y-%%m-%%d')", col, xtime.FormatUTCOffset(offsetSeconds))
+	case dialect.Postgres:
+		return fmt.Sprintf("to_char(%s AT TIME ZONE '%s', 'YYYY-MM-DD')", col, loc.String())
+	default:
+		// Fallback to ANSI-ish cast; many DBs accept this, but not guaranteed
+		return fmt.Sprintf("DATE(%s)", col)
+	}
+}
+
+// requestStatusCounts returns all-time total/failed request counts with
+// stale-while-revalidate caching. The full-table GROUP BY over requests is
+// expensive, so it runs at most once per soft TTL and stale values are served
+// while a background refresh runs.
+func (r *queryResolver) requestStatusCounts(ctx context.Context) (*requestStatusCounts, error) {
+	refresh := func(ctx context.Context) (*requestStatusCounts, error) {
+		// Use singleflight to prevent concurrent refresh attempts
+		result, err, _ := allTimeRefreshGroup.Do("requestStatusCounts", func() (interface{}, error) {
+			var statusCounts []struct {
+				Status request.Status `json:"status"`
+				Count  int            `json:"count"`
+			}
+			if err := r.client.Request.Query().
+				GroupBy(request.FieldStatus).
+				Aggregate(ent.Count()).
+				Scan(ctx, &statusCounts); err != nil {
+				return nil, err
+			}
+
+			counts := &requestStatusCounts{}
+			for _, sc := range statusCounts {
+				counts.Total += sc.Count
+				if sc.Status == request.StatusFailed {
+					counts.Failed = sc.Count
+				}
+			}
+
+			requestCountsCacheMu.Lock()
+			requestCountsCache = counts
+			requestCountsCacheTime = time.Now().UTC()
+			requestCountsCacheMu.Unlock()
+
+			return counts, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		counts, ok := result.(*requestStatusCounts)
+		if !ok {
+			return nil, fmt.Errorf("unexpected type from singleflight: %T", result)
+		}
+
+		return counts, nil
+	}
+
+	requestCountsCacheMu.RLock()
+	cached := requestCountsCache
+	cacheAge := time.Since(requestCountsCacheTime)
+	requestCountsCacheMu.RUnlock()
+
+	if cached != nil && cacheAge < hardTTL {
+		// If cache is stale (exceeded soft TTL), trigger async refresh
+		if cacheAge >= requestCountsSoftTTL {
+			go func() {
+				bgCtx := authz.WithScopeDecision(context.Background(), scopes.ScopeReadDashboard)
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Error(bgCtx, "panic in request status counts cache refresh", log.Any("panic", rec))
+					}
+				}()
+				if _, err := refresh(bgCtx); err != nil {
+					log.Error(bgCtx, "async request status counts cache refresh failed",
+						log.Cause(err),
+						log.Duration("cache_age", cacheAge),
+					)
+				}
+			}()
+		}
+
+		return cached, nil
+	}
+
+	// Cache is missing or expired (exceeded hard TTL) - compute synchronously
+	return refresh(ctx)
 }
 
 type scoredItem[T any] struct {

@@ -6,11 +6,12 @@ import { useChannelSuccessRates } from '../data/dashboard';
 
 interface ChannelSuccessRateProps {
   timeWindow?: string;
+  limit?: number;
 }
 
-export function ChannelSuccessRate({ timeWindow }: ChannelSuccessRateProps) {
+export function ChannelSuccessRate({ timeWindow, limit }: ChannelSuccessRateProps) {
   const { t } = useTranslation();
-  const { data: channels, isLoading, error } = useChannelSuccessRates(undefined, timeWindow);
+  const { data: channels, isLoading, error } = useChannelSuccessRates(limit, timeWindow);
 
   if (isLoading) {
     return (

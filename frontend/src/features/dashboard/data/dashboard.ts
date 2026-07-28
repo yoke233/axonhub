@@ -396,7 +396,8 @@ export function useDashboardStats() {
       const data = await graphqlRequest<{ dashboardOverview: DashboardStats }>(DASHBOARD_STATS_QUERY);
       return dashboardStatsSchema.parse(data.dashboardOverview);
     },
-    refetchInterval: 30000, // Refetch every 30 seconds
+    refetchInterval: 60000, // Refetch every minute
+    staleTime: 60000,
   });
 }
 
@@ -411,6 +412,7 @@ export function useRequestsByChannel(timeWindow?: string) {
       return data.requestStatsByChannel.map((item) => requestsByChannelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -426,6 +428,7 @@ export function useRequestsByModel(timeWindow?: string) {
       return data.requestStatsByModel.map((item) => requestsByModelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -441,6 +444,7 @@ export function useRequestsByAPIKey(timeWindow?: string) {
       return data.requestStatsByAPIKey.map((item) => requestsByAPIKeySchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -456,6 +460,7 @@ export function useTokensByAPIKey(timeWindow?: string) {
       return data.tokenStatsByAPIKey.map((item) => tokensByAPIKeySchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -471,6 +476,7 @@ export function useTokensByChannel(timeWindow?: string) {
       return data.tokenStatsByChannel.map((item) => tokensByChannelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -486,6 +492,7 @@ export function useTokensByModel(timeWindow?: string, options?: { enabled?: bool
       return data.tokenStatsByModel.map((item) => tokensByModelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
     enabled: options?.enabled ?? true,
   });
@@ -502,6 +509,7 @@ export function useCostByChannel(timeWindow?: string) {
       return data.costStatsByChannel.map((item) => costByChannelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -517,6 +525,7 @@ export function useCostByModel(timeWindow?: string) {
       return data.costStatsByModel.map((item) => costByModelSchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -532,6 +541,7 @@ export function useCostByAPIKey(timeWindow?: string) {
       return data.costStatsByAPIKey.map((item) => costByAPIKeySchema.parse(item));
     },
     refetchInterval: 60000,
+    staleTime: 60000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -544,6 +554,7 @@ export function useDailyRequestStats() {
       return data.dailyRequestStats.map((item) => dailyRequestStatsSchema.parse(item));
     },
     refetchInterval: 300000, // Refetch every 5 minutes
+    staleTime: 300000,
   });
 }
 
@@ -555,6 +566,7 @@ export function useHourlyRequestStats(date?: string) {
       return data.hourlyRequestStats.map((item) => hourlyRequestStatsSchema.parse(item));
     },
     refetchInterval: 300000,
+    staleTime: 300000,
   });
 }
 
@@ -566,6 +578,7 @@ export function useTopProjects() {
       return data.topRequestsProjects.map((item) => topProjectsSchema.parse(item));
     },
     refetchInterval: 300000,
+    staleTime: 300000,
   });
 }
 
@@ -577,6 +590,7 @@ export function useTokenStats() {
       return tokenStatsSchema.parse(data.tokenStats);
     },
     refetchInterval: 300000, // Refetch every 5 minutes
+    staleTime: 300000,
   });
 }
 
@@ -591,6 +605,7 @@ export function useChannelSuccessRates(limit?: number, timeWindow?: string) {
       return data.channelSuccessRates.map((item) => channelSuccessRateSchema.parse(item));
     },
     refetchInterval: 300000,
+    staleTime: 300000,
     placeholderData: (previousData) => previousData,
   });
 }
@@ -752,6 +767,7 @@ export function useModelPerformanceStats() {
       return data.modelPerformanceStats.map((item) => modelPerformanceStatSchema.parse(item));
     },
     refetchInterval: 300000, // Refetch every 5 minutes
+    staleTime: 300000,
   });
 }
 
@@ -763,5 +779,6 @@ export function useChannelPerformanceStats() {
       return data.channelPerformanceStats.map((item) => channelPerformanceStatSchema.parse(item));
     },
     refetchInterval: 300000, // Refetch every 5 minutes
+    staleTime: 300000,
   });
 }

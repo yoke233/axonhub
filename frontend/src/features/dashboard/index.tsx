@@ -4,7 +4,6 @@ import { Link } from '@tanstack/react-router';
 import { BarChart3, Brain, Key, Zap, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Skeleton } from '@/components/ui/skeleton';
 import { Header } from '@/components/layout/header';
 import { formatNumber } from '@/utils/format-number';
 import { TimePeriodSelector } from '@/components/time-period-selector';
@@ -25,7 +24,6 @@ import { FastestModelsCard } from './components/fastest-models-card';
 import { ModelPerformanceStats } from './components/model-performance-stats';
 import { ChannelPerformanceStats } from './components/channel-performance-stats';
 import { StatsExportDialog } from './components/stats-export-dialog';
-import { useDashboardStats } from './data/dashboard';
 
 interface CollapsibleSectionProps {
   title: string;
@@ -91,7 +89,6 @@ function CollapsibleSection({ title, icon, children, storageKey, defaultOpen = f
 
 export default function DashboardPage() {
   const { t } = useTranslation();
-  const { isLoading, error } = useDashboardStats();
   const [modelTotalRequests, setModelTotalRequests] = useState(0);
   const [channelTotalRequests, setChannelTotalRequests] = useState(0);
 
@@ -104,38 +101,6 @@ export default function DashboardPage() {
   const channelPerformanceDescription = useMemo(() => {
     return t('dashboard.charts.performanceDescription', { count: formatNumber(channelTotalRequests) });
   }, [t, channelTotalRequests]);
-
-  if (isLoading) {
-    return (
-      <div className='flex-1 space-y-4 p-8 pt-6'>
-        <div className='flex items-center justify-between space-y-2'>
-          <Skeleton className='h-8 w-[200px]' />
-        </div>
-        <div className='space-y-4'>
-          <div className='grid gap-4 md:grid-cols-1 lg:grid-cols-4'>
-            <Skeleton className='h-[180px]' />
-            <Skeleton className='h-[180px]' />
-            <Skeleton className='h-[180px]' />
-            <Skeleton className='h-[180px]' />
-          </div>
-          <div className='grid gap-4 md:grid-cols-2 lg:grid-cols-7'>
-            <Skeleton className='col-span-1 h-[300px] lg:col-span-4' />
-            <Skeleton className='col-span-1 h-[300px] lg:col-span-3' />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className='flex-1 space-y-4 p-8 pt-6'>
-        <div className='text-red-500'>
-          {t('common.loadError')} {error.message}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className='flex-1 space-y-6 p-8 pt-6'>
@@ -175,7 +140,7 @@ export default function DashboardPage() {
               </CardAction>
             </CardHeader>
             <CardContent>
-              <ChannelSuccessRate timeWindow={timePeriod} />
+              <ChannelSuccessRate timeWindow={timePeriod} limit={5} />
             </CardContent>
           </Card>
         </div>
